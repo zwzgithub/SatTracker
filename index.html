@@ -1,0 +1,1730 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#05080f">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="SatTrack">
+<meta name="format-detection" content="telephone=no">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
+<link rel="manifest" href="manifest.webmanifest">
+<title>Constellation Tracker</title>
+<script>
+/* Double-click support (file://): Chrome/Edge refuse to start Cesium's ES-module workers from a file:// page.
+ * Re-launch them as classic workers that import() the module. No effect when served over http(s). */
+(function () {
+  if (location.protocol !== 'file:' || !window.Worker) return;
+  const NativeWorker = window.Worker;
+  window.Worker = function (url, opts) {
+    if (!opts || opts.type !== 'module') return new NativeWorker(url, opts);
+    let target = String(url);
+    if (target.startsWith('blob:')) {
+      try { const x = new XMLHttpRequest(); x.open('GET', target, false); x.send();
+            const m = /import\s*["']([^"']+)["']/.exec(x.responseText); if (m) target = m[1]; } catch (e) {}
+    }
+    const src = 'var q=[],b=function(e){q.push(e)};self.onmessage=b;' +
+      'import(' + JSON.stringify(target) + ').then(function(){var h=self.onmessage;if(h&&h!==b)q.forEach(function(e){h(e)});q=[];},' +
+      'function(e){console.error("Cesium worker failed to load",e)});';
+    return new NativeWorker(URL.createObjectURL(new Blob([src], { type: 'application/javascript' })));
+  };
+  window.Worker.prototype = NativeWorker.prototype;
+})();
+</script>
+<script src="https://cdn.jsdelivr.net/npm/cesium@1.121.0/Build/Cesium/Cesium.js"></script>
+<link href="https://cdn.jsdelivr.net/npm/cesium@1.121.0/Build/Cesium/Widgets/widgets.css" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/satellite.js/4.1.4/satellite.min.js"></script>
+<style>
+:root{
+  --bg:rgba(9,14,25,.84); --bg-solid:#0a101c; --bg2:rgba(255,255,255,.05); --line:rgba(140,180,255,.14);
+  --tx:#e6edf7; --tx2:#8c9ab0; --tx3:#5d6b80; --acc:#5ab0ff; --ok:#4ade80; --warn:#fbbf24; --bad:#f87171;
+  --mono:ui-monospace,"SF Mono",Menlo,"Cascadia Mono",Consolas,monospace;
+  --sat:env(safe-area-inset-top,0px); --sab:env(safe-area-inset-bottom,0px);
+  --sal:env(safe-area-inset-left,0px); --sar:env(safe-area-inset-right,0px);
+}
+*{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{position:fixed;inset:0;overflow:hidden;overscroll-behavior:none;background:#000;color:var(--tx);
+  font:14px/1.4 -apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",system-ui,sans-serif;
+  -webkit-user-select:none;user-select:none;-webkit-touch-callout:none;-webkit-text-size-adjust:100%}
+button{font:inherit;color:inherit}
+#cesiumContainer{position:absolute;inset:0;touch-action:none}
+.cesium-viewer-bottom,.cesium-viewer-toolbar{display:none!important}
+body.picking #cesiumContainer{cursor:crosshair}
+
+/* ---------- top HUD ---------- */
+#hud{position:absolute;z-index:12;top:calc(var(--sat) + 8px);left:50%;transform:translateX(-50%);display:flex;align-items:center;gap:4px;
+  padding:4px;border-radius:16px;background:var(--bg);backdrop-filter:blur(18px) saturate(1.3);-webkit-backdrop-filter:blur(18px) saturate(1.3);
+  border:1px solid var(--line);box-shadow:0 8px 30px rgba(0,0,0,.45)}
+.hb{height:36px;min-width:40px;padding:0 10px;border-radius:12px;border:none;background:var(--bg2);cursor:pointer;font-size:13px;font-weight:600}
+.hb:active{background:rgba(90,176,255,.25)}
+#btnSpeed{font-family:var(--mono);min-width:54px}
+#clock{height:36px;padding:0 8px;border:none;background:none;cursor:pointer;font-family:var(--mono);font-size:14px;
+  font-variant-numeric:tabular-nums;white-space:nowrap}
+#clock small{color:var(--tx2);font-size:10.5px;margin-left:3px}
+#clock.off{color:var(--warn)}
+.pop{position:absolute;z-index:13;top:calc(var(--sat) + 58px);left:50%;transform:translateX(-50%);width:min(360px,calc(100% - 24px));
+  padding:14px;border-radius:16px;background:rgba(9,14,25,.95);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);
+  border:1px solid var(--line);box-shadow:0 12px 40px rgba(0,0,0,.55)}
+.pop[hidden]{display:none}
+.scrubLbl{display:flex;justify-content:space-between;font-size:11px;color:var(--tx3);font-family:var(--mono);margin-top:2px}
+#scrubVal{color:var(--tx)}
+
+/* ---------- floating buttons ---------- */
+#fabs{position:absolute;z-index:11;right:calc(var(--sar) + 10px);bottom:calc(var(--peekH,150px) + 12px);display:flex;flex-direction:column;gap:8px;
+  transition:bottom .28s cubic-bezier(.2,.8,.2,1),opacity .2s}
+.fab{width:44px;height:44px;border-radius:14px;border:1px solid var(--line);background:var(--bg);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);
+  display:grid;place-items:center;cursor:pointer;font-size:12px;font-weight:700;color:var(--tx);box-shadow:0 6px 20px rgba(0,0,0,.4)}
+.fab:active,.fab.on{background:rgba(90,176,255,.28);border-color:var(--acc)}
+.fab svg{width:22px;height:22px}
+
+/* ---------- bottom sheet ---------- */
+#sheet{position:absolute;z-index:10;left:0;right:0;bottom:0;height:calc(100% - var(--sat) - 64px);display:flex;flex-direction:column;
+  background:var(--bg);backdrop-filter:blur(22px) saturate(1.3);-webkit-backdrop-filter:blur(22px) saturate(1.3);
+  border-top:1px solid var(--line);border-radius:20px 20px 0 0;box-shadow:0 -10px 40px rgba(0,0,0,.45);
+  transform:translateY(var(--ty,60%));transition:transform .3s cubic-bezier(.2,.8,.2,1);will-change:transform}
+#sheet.drag{transition:none}
+#grab{touch-action:none;cursor:grab;padding:0 16px;padding-left:calc(16px + var(--sal));padding-right:calc(16px + var(--sar))}
+.handle{width:38px;height:5px;border-radius:3px;background:rgba(255,255,255,.22);margin:8px auto 6px}
+#peek{display:flex;align-items:center;gap:10px;min-height:52px;padding-bottom:6px}
+.pk-l{flex:1;min-width:0}
+.pk-t{display:flex;align-items:center;gap:7px}
+.pk-t .nm{font-size:16px;font-weight:650;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pk-s{font-size:12px;color:var(--tx2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px}
+.pk-r{text-align:right;font-family:var(--mono);font-variant-numeric:tabular-nums;white-space:nowrap}
+.pk-r div:first-child{font-size:17px;font-weight:600}
+.pk-r div:last-child{font-size:12px;color:var(--tx2)}
+.pk-r small{font-size:11px;color:var(--tx2);margin-left:1px}
+#tabs{display:flex;gap:4px;padding:4px 12px 8px;padding-left:calc(12px + var(--sal));padding-right:calc(12px + var(--sar));border-bottom:1px solid var(--line)}
+#tabs button{flex:1;height:34px;border:none;border-radius:10px;background:none;color:var(--tx2);font-size:13px;font-weight:600;cursor:pointer}
+#tabs button.on{background:rgba(90,176,255,.18);color:#fff}
+.panels{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;
+  padding:2px 16px calc(24px + var(--sab));padding-left:calc(16px + var(--sal));padding-right:calc(16px + var(--sar));
+  scrollbar-width:thin;scrollbar-color:#2a3a55 transparent;-webkit-user-select:none}
+.panels section[hidden]{display:none}
+
+/* docked panel for landscape phones / tablets / desktop */
+@media (min-width:600px) and (min-aspect-ratio:1/1){
+  #sheet{left:auto;right:calc(var(--sar) + 10px);top:calc(var(--sat) + 10px);bottom:calc(var(--sab) + 10px);width:min(360px,48vw);height:auto;
+    border:1px solid var(--line);border-radius:18px;transform:none!important}
+  .handle{display:none}#grab{cursor:default}
+  #hud{left:calc(var(--sal) + 10px);transform:none}
+  .pop{left:calc(var(--sal) + 10px);transform:none}
+  #fabs{right:auto;left:calc(var(--sal) + 10px);bottom:calc(var(--sab) + 12px)}
+  .panels{padding-bottom:16px}
+}
+
+/* ---------- panel content ---------- */
+.sec{margin-top:16px}
+.sec>h3{font-size:11px;font-weight:650;letter-spacing:1px;text-transform:uppercase;color:var(--tx3);margin-bottom:8px;display:flex;align-items:center;gap:6px}
+.sec>h3 .r{margin-left:auto;text-transform:none;letter-spacing:0;font-weight:400;color:var(--tx2)}
+.row{display:flex;gap:8px;align-items:center}.row+.row{margin-top:8px}
+select,input[type=text],input[type=number],input[type=datetime-local],input[type=search]{flex:1;min-width:0;height:40px;padding:0 11px;border-radius:10px;
+  border:1px solid var(--line);background:rgba(0,0,0,.35);color:var(--tx);font:inherit;font-size:16px;outline:none;-webkit-user-select:text;user-select:text;
+  -webkit-appearance:none;appearance:none}
+select{background-image:linear-gradient(45deg,transparent 50%,var(--tx2) 50%),linear-gradient(135deg,var(--tx2) 50%,transparent 50%);
+  background-position:calc(100% - 16px) 50%,calc(100% - 11px) 50%;background-size:5px 5px;background-repeat:no-repeat;padding-right:28px}
+input[type=datetime-local]{color-scheme:dark}
+select:focus,input:focus{border-color:var(--acc)}
+select option,select optgroup{background:#0e1626}
+input[type=number]{font-family:var(--mono)}
+input[type=range]{width:100%;accent-color:var(--acc);height:30px}
+.btn{height:40px;padding:0 14px;border-radius:10px;border:1px solid var(--line);background:var(--bg2);color:var(--tx);
+  cursor:pointer;white-space:nowrap;display:inline-flex;align-items:center;justify-content:center;gap:6px;font-size:14px}
+.btn:active{background:rgba(90,176,255,.2)}
+.btn.pri{background:#1d5fa8;border-color:#2f7bd0;font-weight:600}
+.btn.on{background:rgba(90,176,255,.22);border-color:var(--acc);color:#fff}
+.btn.sm{height:32px;padding:0 10px;font-size:13px;border-radius:8px}
+.btn.icon{width:40px;padding:0}
+.btn.grow{flex:1}
+.lbl{font-size:12px;color:var(--tx2);width:62px;flex:none}
+.hint{font-size:12px;color:var(--tx3);margin-top:8px;line-height:1.45}
+.empty{color:var(--tx3);font-size:13px;padding:6px 2px}
+.chips{display:flex;gap:6px;flex-wrap:wrap}
+
+/* constellation picker */
+.conGrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(98px,1fr));gap:6px}
+.cg{height:40px;border-radius:10px;border:1px solid var(--line);background:var(--bg2);display:flex;align-items:center;gap:7px;padding:0 9px;
+  font-size:13px;cursor:pointer;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.cg .d{width:9px;height:9px;border-radius:50%;flex:none}
+.cg.on{border-color:currentColor;background:rgba(255,255,255,.07)}
+.cg.on span{color:var(--tx)}
+.cg.busy{opacity:.55}
+.cgh{font-size:10.5px;color:var(--tx3);margin:10px 0 5px;letter-spacing:.4px}
+
+/* legend */
+#legend{display:flex;flex-direction:column;gap:6px}
+.lg{display:flex;align-items:center;gap:8px;padding:6px 6px 6px 10px;border-radius:10px;background:var(--bg2)}
+.lg .sw{width:10px;height:10px;border-radius:50%;flex:none;box-shadow:0 0 8px currentColor}
+.lg .nm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.lg .ct{font-family:var(--mono);font-size:11.5px;color:var(--tx2)}
+.lg .ct b{color:var(--ok);font-weight:600}
+.lg .ib{background:none;border:none;color:var(--tx2);cursor:pointer;font-size:15px;width:34px;height:34px;border-radius:8px;display:grid;place-items:center}
+.lg .ib:active{background:rgba(255,255,255,.1)}
+.lg .ib.off{opacity:.3}
+.lg.hidden .nm,.lg.hidden .ct{opacity:.4}
+.age{font-size:10.5px;padding:1px 5px;border-radius:4px;font-family:var(--mono)}
+.age.ok{color:var(--ok);background:rgba(74,222,128,.1)}.age.old{color:var(--warn);background:rgba(251,191,36,.1)}.age.bad{color:var(--bad);background:rgba(248,113,113,.12)}
+.shells{display:flex;flex-wrap:wrap;gap:6px;padding:2px 2px 4px 18px}
+.sh{font-family:var(--mono);font-size:11.5px;height:30px;padding:0 10px;border-radius:15px;border:1px solid var(--line);background:none;color:var(--tx2);cursor:pointer}
+.sh.on{color:var(--tx);border-color:currentColor}
+.sh.all{color:var(--acc)}
+.tlbl{font-size:11px;color:var(--tx3);margin:8px 0 5px}
+.tchips{display:flex;flex-wrap:wrap;gap:6px}
+.tc{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;height:32px;padding:0 11px;border-radius:16px;border:1px solid var(--line);
+  background:none;color:var(--tx3);cursor:pointer}
+.tc .d{width:8px;height:8px;border-radius:50%;opacity:.35}
+.tc.on{color:var(--tx);border-color:rgba(140,180,255,.35);background:rgba(255,255,255,.05)}.tc.on .d{opacity:1}
+.tc b{font-family:var(--mono);font-weight:500;font-size:11px;color:var(--tx2)}
+.tc.zero{display:none}
+
+/* toggles */
+.tg{display:flex;align-items:center;justify-content:space-between;min-height:42px;cursor:pointer;gap:12px}
+.tg+.tg{border-top:1px solid rgba(140,180,255,.07)}
+.tg input{display:none}
+.tg .sl{width:44px;height:26px;border-radius:13px;background:#26324a;position:relative;transition:background .15s;flex:none}
+.tg .sl:after{content:"";position:absolute;top:3px;left:3px;width:20px;height:20px;border-radius:50%;background:#9fb0c8;transition:all .18s}
+.tg input:checked+.sl{background:#2f7bd0}.tg input:checked+.sl:after{left:21px;background:#fff}
+.seg{display:flex;background:rgba(0,0,0,.3);border:1px solid var(--line);border-radius:10px;padding:3px;gap:3px}
+.seg button{flex:1;height:32px;border:none;border-radius:7px;background:none;color:var(--tx2);font-size:13px;cursor:pointer}
+.seg button.on{background:rgba(90,176,255,.25);color:#fff;font-weight:600}
+
+/* telemetry */
+.badge{font-size:10px;padding:2px 6px;border-radius:5px;letter-spacing:.4px;text-transform:uppercase;font-weight:700;flex:none}
+.badge.sel{background:rgba(90,176,255,.18);color:var(--acc)}.badge.srv{background:rgba(74,222,128,.15);color:var(--ok)}
+.badge.none{background:rgba(255,255,255,.06);color:var(--tx3)}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+.kv{background:var(--bg2);border-radius:10px;padding:8px 10px}
+.kv .k{font-size:10.5px;color:var(--tx3);text-transform:uppercase;letter-spacing:.6px}
+.kv .v{font-family:var(--mono);font-size:16px;font-variant-numeric:tabular-nums;white-space:nowrap}
+.kv .v small{font-size:11px;color:var(--tx2);margin-left:2px}
+.cnt{font-size:12.5px;color:var(--tx2);margin-top:12px}.cnt b{color:var(--tx);font-family:var(--mono)}.cnt b.g{color:var(--ok)}
+canvas.chart{width:100%;display:block;border-radius:10px;background:rgba(0,0,0,.28)}
+#sky{max-width:420px;margin:0 auto;aspect-ratio:1/1}
+#passes{display:flex;flex-direction:column;gap:4px;font-family:var(--mono);font-size:12.5px}
+.ps{display:grid;grid-template-columns:1fr 60px 56px;gap:6px;padding:9px 10px;border-radius:8px;background:var(--bg2);cursor:pointer}
+.ps:active{background:rgba(90,176,255,.2)}.ps.now{outline:1px solid var(--ok)}
+.ps.h{color:var(--tx3);background:none;padding-top:0;padding-bottom:0;cursor:default}
+.meta{display:grid;grid-template-columns:auto 1fr;gap:5px 12px;font-size:13px}
+.meta dt{color:var(--tx3)}.meta dd{font-family:var(--mono);text-align:right}
+#visList{display:flex;flex-direction:column;gap:4px}
+.vl{display:grid;grid-template-columns:12px 1fr 58px 50px 74px;gap:6px;align-items:center;padding:8px 10px;border-radius:8px;background:var(--bg2);
+  font-family:var(--mono);font-size:12px;cursor:pointer;font-variant-numeric:tabular-nums}
+.vl:active{background:rgba(90,176,255,.2)}
+.vl .n{font-family:inherit;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12.5px}
+.vl span:not(.n){text-align:right}
+.vl.sel{outline:1px solid #fff}.vl.best{outline:1px solid var(--ok)}
+.vl.h{background:none;color:var(--tx3);cursor:default;padding-top:0;padding-bottom:0;font-size:11px}
+.skyBar{display:flex;align-items:center;gap:8px;margin-bottom:8px}
+#hdgVal{font-family:var(--mono);font-size:13px;color:var(--tx2);margin-left:auto}
+.install{background:rgba(90,176,255,.1);border:1px solid rgba(90,176,255,.3);border-radius:12px;padding:12px;font-size:13px;line-height:1.5}
+.install b{color:#fff}
+.about{font-size:12px;color:var(--tx3);line-height:1.5}
+.about a{color:var(--acc)}
+
+/* toast + tooltip */
+#toast{position:absolute;z-index:30;top:calc(var(--sat) + 58px);left:50%;transform:translate(-50%,calc(-100% - 80px));transition:transform .25s;
+  background:rgba(12,20,34,.96);border:1px solid var(--line);border-radius:12px;padding:10px 14px;display:flex;gap:10px;align-items:center;
+  width:max-content;max-width:calc(100% - 24px);font-size:13px;box-shadow:0 10px 30px rgba(0,0,0,.5)}
+#toast.show{transform:translate(-50%,0)}#toast.err{border-color:rgba(248,113,113,.5)}
+.spin{width:15px;height:15px;border:2px solid rgba(90,176,255,.25);border-top-color:var(--acc);border-radius:50%;animation:sp .8s linear infinite;flex:none}
+@keyframes sp{to{transform:rotate(360deg)}}
+#tip{position:absolute;z-index:15;pointer-events:none;background:rgba(8,12,22,.92);border:1px solid var(--line);border-radius:7px;
+  padding:4px 8px;font-size:12px;display:none;white-space:nowrap}
+#tip i{font-style:normal;color:var(--tx2);font-family:var(--mono);font-size:11px}
+#lpRing{position:absolute;z-index:14;width:56px;height:56px;margin:-28px 0 0 -28px;border-radius:50%;border:3px solid var(--ok);pointer-events:none;
+  opacity:0;transform:scale(.4)}
+#lpRing.go{animation:lp .6s ease-out forwards}
+@keyframes lp{from{opacity:.2;transform:scale(1.2)}to{opacity:1;transform:scale(.6)}}
+</style>
+</head>
+<body>
+<div id="cesiumContainer"></div>
+<div id="lpRing"></div>
+
+<!-- ================= top HUD ================= -->
+<div id="hud">
+  <button class="hb" id="btnPlay" aria-label="Play / pause">❚❚</button>
+  <button class="hb" id="btnSpeed" aria-label="Speed">1×</button>
+  <button id="clock" aria-label="Set time">--</button>
+  <button class="hb" id="btnNow">Now</button>
+</div>
+<div class="pop" id="timePop" hidden>
+  <div class="row"><input type="datetime-local" id="dtIn" step="1"><span style="color:var(--tx2);font-size:12px">UTC</span></div>
+  <div style="margin-top:12px"><input type="range" id="scrub" min="-720" max="1440" step="1" value="0"></div>
+  <div class="scrubLbl"><span>−12 h</span><span id="scrubVal">now</span><span>+24 h</span></div>
+  <div class="chips" id="speeds" style="margin-top:12px">
+    <button class="btn sm" data-s="1">1×</button><button class="btn sm" data-s="10">10×</button><button class="btn sm" data-s="60">60×</button>
+    <button class="btn sm" data-s="300">300×</button><button class="btn sm" data-s="1200">1200×</button>
+  </div>
+</div>
+
+<!-- ================= floating buttons ================= -->
+<div id="fabs">
+  <button class="fab" id="fabLoc" aria-label="Use my location" title="Use my location">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/><circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="2.5" fill="currentColor"/></svg></button>
+  <button class="fab" id="fabHome" aria-label="Fly to ground terminal" title="Fly to ground terminal">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3.2 3 14.8 0 18M12 3c-3 3.2-3 14.8 0 18"/></svg></button>
+  <button class="fab" id="fab2d" aria-label="2D / 3D">2D</button>
+</div>
+
+<!-- ================= bottom sheet ================= -->
+<div id="sheet">
+  <div id="grab">
+    <div class="handle"></div>
+    <div id="peek">
+      <div class="pk-l">
+        <div class="pk-t"><span class="badge none" id="tBadge">—</span><span class="nm" id="tName">No satellite in view</span></div>
+        <div class="pk-s" id="tSub">Load a constellation to begin</div>
+      </div>
+      <div class="pk-r"><div id="pkEl">—</div><div id="pkDop"></div></div>
+    </div>
+  </div>
+  <nav id="tabs">
+    <button data-tab="link" class="on">Link</button><button data-tab="sky">Sky</button>
+    <button data-tab="layers">Layers</button><button data-tab="setup">Setup</button>
+  </nav>
+  <div class="panels" id="panels">
+
+    <!-- LINK -->
+    <section data-panel="link">
+      <div class="cnt"><b id="cTot">0</b> satellites shown · <b class="g" id="cVis">0</b> above mask · <span id="ueName"></span></div>
+      <div class="grid" style="margin-top:10px">
+        <div class="kv"><div class="k">Elevation</div><div class="v" id="vEl">—</div></div>
+        <div class="kv"><div class="k">Azimuth</div><div class="v" id="vAz">—</div></div>
+        <div class="kv"><div class="k">Slant range</div><div class="v" id="vRng">—</div></div>
+        <div class="kv"><div class="k">1-way delay</div><div class="v" id="vDly">—</div></div>
+        <div class="kv"><div class="k">Doppler</div><div class="v" id="vDop">—</div></div>
+        <div class="kv"><div class="k">Doppler rate</div><div class="v" id="vDr">—</div></div>
+        <div class="kv"><div class="k">FSPL</div><div class="v" id="vFspl">—</div></div>
+        <div class="kv"><div class="k">Altitude</div><div class="v" id="vAlt">—</div></div>
+      </div>
+      <div id="selBox" style="display:none">
+        <div class="row" style="margin-top:12px">
+          <button class="btn grow" id="btnFollow">Follow camera</button>
+          <button class="btn grow" id="btnDesel">Deselect</button>
+        </div>
+        <div class="sec">
+          <h3>Pass Doppler · elevation <span class="r" id="passLbl"></span></h3>
+          <canvas class="chart" id="dopChart" height="150"></canvas>
+        </div>
+        <div class="sec">
+          <h3>Upcoming passes (24 h) <span class="r">tap to jump</span></h3>
+          <div id="passes"></div>
+        </div>
+        <div class="sec">
+          <h3>Orbit / TLE</h3>
+          <dl class="meta" id="meta"></dl>
+        </div>
+      </div>
+      <div class="hint" id="linkHint">Tap a satellite to select it. With nothing selected, the <b style="color:var(--ok)">serving</b> satellite (highest elevation) is shown.
+        Long-press the globe to move the ground terminal.</div>
+    </section>
+
+    <!-- SKY -->
+    <section data-panel="sky" hidden>
+      <div class="sec" style="margin-top:12px">
+        <div class="skyBar">
+          <button class="btn sm" id="btnCompass">Compass: off</button>
+          <span id="hdgVal"></span>
+          <span class="r" id="skyCnt" style="font-size:12px;color:var(--tx2)"></span>
+        </div>
+        <canvas class="chart" id="sky"></canvas>
+        <div class="hint" id="skyHint">Polar sky plot at the UE: zenith in the centre, horizon on the rim, dashed ring = elevation mask.
+          Compass mode rotates it so the top of the phone points up — hold the phone flat.</div>
+      </div>
+      <div class="sec">
+        <h3>In view <span class="r">tap to select</span></h3>
+        <div id="visList"></div>
+      </div>
+    </section>
+
+    <!-- LAYERS -->
+    <section data-panel="layers" hidden>
+      <div class="sec" style="margin-top:12px">
+        <h3>Constellations <span class="r">tap to add / remove</span></h3>
+        <div id="conWrap"></div>
+      </div>
+      <div class="sec">
+        <h3>Search CelesTrak</h3>
+        <div class="row">
+          <input type="search" id="searchInput" placeholder="Name or NORAD ID (ISS, 25544…)" enterkeyhint="search" autocapitalize="characters" autocomplete="off">
+          <button class="btn icon" id="btnSearch" aria-label="Search">⌕</button>
+        </div>
+        <div class="row">
+          <button class="btn sm" id="btnFile">Load TLE file…</button>
+          <input type="file" id="fileInput" accept=".txt,.tle,.3le,text/plain" hidden>
+          <span style="flex:1"></span>
+          <button class="btn sm" id="btnClear">Clear all</button>
+        </div>
+      </div>
+      <div class="sec">
+        <h3>Loaded <span class="r" id="legendSum"></span></h3>
+        <div id="legend"><div class="empty">Nothing loaded yet.</div></div>
+      </div>
+      <div class="sec" id="typeSec" style="display:none">
+        <h3>Orbit type filter <span class="r"><a href="#" id="typeReset" style="color:var(--acc);text-decoration:none">show all</a></span></h3>
+        <div class="tlbl">Regime</div><div class="tchips" id="regChips"></div>
+        <div class="tlbl">Plane (inclination)</div><div class="tchips" id="incChips"></div>
+        <div class="row" style="margin-top:10px"><span class="lbl">Color by</span>
+          <select id="colorBy"><option value="group">Constellation</option><option value="reg">Orbit regime</option><option value="inc">Plane type</option></select></div>
+        <div class="hint">Tap a chip to toggle · press and hold to show only that type (same for shell chips).</div>
+      </div>
+    </section>
+
+    <!-- SETUP -->
+    <section data-panel="setup" hidden>
+      <div class="sec" style="margin-top:12px">
+        <h3>Ground terminal (UE)</h3>
+        <div class="row"><button class="btn grow pri" id="btnGeo">Use my location</button><button class="btn grow" id="btnPick">Pick on globe</button></div>
+        <div class="row"><span class="lbl">Lat / Lon</span>
+          <input type="number" id="ueLat" step="0.0001" inputmode="decimal" value="31.2304"><input type="number" id="ueLon" step="0.0001" inputmode="decimal" value="121.4737"></div>
+        <div class="row"><span class="lbl">Mask °</span><input type="number" id="ueMask" step="1" min="0" max="89" inputmode="numeric" value="10">
+          <span class="lbl" style="width:auto">f<sub>c</sub> GHz</span><input type="number" id="fcGHz" step="0.1" min="0.1" inputmode="decimal" value="2.0"></div>
+        <div class="chips" id="fcChips" style="margin-top:8px">
+          <button class="btn sm" data-f="1.6">L 1.6</button><button class="btn sm" data-f="2.0">S 2.0 (n256)</button>
+          <button class="btn sm" data-f="12">Ku 12</button><button class="btn sm" data-f="20">Ka 20</button></div>
+        <div class="hint">f<sub>c</sub> drives Doppler and FSPL. Tip: long-press anywhere on the globe to drop the UE there.</div>
+      </div>
+      <div class="sec">
+        <h3>Display</h3>
+        <div class="row"><span class="lbl">Base map</span>
+          <select id="baseMap"><option value="satnight">Satellite + night lights</option><option value="sat">Satellite imagery</option>
+            <option value="dark">Dark vector map</option><option value="night">Night lights only</option></select></div>
+        <div class="row"><span class="lbl">Orbits</span>
+          <select id="orbitMode"><option value="auto">Auto (≤ 160 planes)</option><option value="all">All orbit planes</option>
+            <option value="selected">Selected satellite only</option><option value="off">Off</option></select></div>
+        <div class="row"><span class="lbl">Ring style</span>
+          <select id="ringStyle"><option value="line">Thin line</option><option value="dots">Dotted</option></select></div>
+        <div style="margin-top:6px">
+          <label class="tg">Day / night lighting<input type="checkbox" id="tLight" checked><span class="sl"></span></label>
+          <label class="tg">Links to visible satellites<input type="checkbox" id="tLinks" checked><span class="sl"></span></label>
+          <label class="tg">Ground track + footprint (selected)<input type="checkbox" id="tTrack" checked><span class="sl"></span></label>
+          <label class="tg">Keep screen awake<input type="checkbox" id="tWake"><span class="sl"></span></label>
+        </div>
+      </div>
+      <div class="sec">
+        <h3>Rendering quality</h3>
+        <div class="seg" id="qualSeg"><button data-q="eco">Battery</button><button data-q="bal">Balanced</button><button data-q="max">Sharp</button></div>
+        <div class="hint">Battery = 1× pixels, 30 fps. Balanced = 1.5×. Sharp = full Retina + MSAA (hot on phones with 10k satellites).</div>
+      </div>
+      <div class="sec">
+        <h3>App</h3>
+        <div class="install" id="installBox"></div>
+        <div class="row" style="margin-top:10px"><button class="btn sm" id="btnRefreshTle">Refresh TLEs now</button><button class="btn sm" id="btnReset">Reset app</button></div>
+        <p class="about" style="margin-top:12px">Positions: SGP4 (satellite.js) in TEME → ECEF via GMST, f/g-series interpolation between SGP4 refreshes.
+          Doppler = −f<sub>c</sub>·ṙ/c for a static UE (no UE motion / pre-compensation). TLEs: CelesTrak GP (cached on the device, refreshed every 2 h).
+          Globe: CesiumJS. Imagery © Esri World Imagery, NASA GIBS VIIRS Black Marble, © OpenStreetMap contributors © CARTO.</p>
+      </div>
+    </section>
+  </div>
+</div>
+
+<div id="toast"><div class="spin" id="toastSpin"></div><span id="toastMsg"></span><span id="toastAct"></span></div>
+<div id="tip"></div>
+
+<script>
+'use strict';
+/* =====================================================================
+ *  Constants
+ * ===================================================================*/
+const MU      = 398600.4418;          // km^3/s^2
+const RE      = 6378.137;             // km (WGS-84 a)
+const OMEGA_E = 7.2921150e-5;         // rad/s
+const C_KMS   = 299792.458;           // km/s
+const REFRESH_S   = 60;               // max age of an SGP4 state before re-propagation [s sim]
+let   FRAME_BUDGET_MS = 5;            // SGP4 budget per frame (set by quality preset)
+const RING_PTS    = 128;              // vertices per orbit-ring line
+const RING_DOTS   = 48;               // dots per ring in dotted style
+const AUTO_MAX_PLANES = 160;          // Auto mode: draw plane rings only if the shown sats form ≤ this many planes
+const MAX_LINKS   = 16;               // link lines to the N highest satellites
+const RING_REBUILD_S = 6 * 3600;      // rebuild rings when sim time drifts (J2 node regression)
+const TLE_TTL_MS  = 2 * 3600 * 1000;  // CelesTrak updates GP data ~every 2 h
+const TAP_RADIUS_PX = 24;             // finger-friendly pick radius
+const LONG_PRESS_MS = 600;
+const SPEEDS = [1, 10, 60, 300, 1200];
+const CELESTRAK = 'https://celestrak.org/NORAD/elements/gp.php';
+
+const CATALOG = [
+  { h: 'LEO broadband', items: [['starlink', 'Starlink'], ['oneweb', 'OneWeb'], ['qianfan', 'Qianfan 千帆'], ['hulianwang', 'Guowang 国网'], ['kuiper', 'Kuiper']] },
+  { h: 'Navigation (MEO)', items: [['gps-ops', 'GPS'], ['glo-ops', 'GLONASS'], ['galileo', 'Galileo'], ['beidou', 'BeiDou 北斗']] },
+  { h: 'MSS / IoT / EO', items: [['iridium-NEXT', 'Iridium'], ['globalstar', 'Globalstar'], ['orbcomm', 'ORBCOMM'], ['planet', 'Planet'], ['spire', 'Spire']] },
+  { h: 'Other', items: [['geo', 'GEO'], ['stations', 'Stations'], ['amateur', 'Amateur'], ['visual', '100 brightest']] }];
+const COLORS = {
+  starlink:'#38bdf8', oneweb:'#fb923c', qianfan:'#f472b6', hulianwang:'#f87171', kuiper:'#facc15',
+  'gps-ops':'#4ade80', 'glo-ops':'#ef4444', galileo:'#60a5fa', beidou:'#fde047',
+  'iridium-NEXT':'#c084fc', globalstar:'#2dd4bf', orbcomm:'#a3e635', planet:'#34d399', spire:'#fb7185',
+  geo:'#e879f9', stations:'#ffffff', amateur:'#bbf7d0', visual:'#fde68a'
+};
+const EXTRA = ['#93c5fd','#fca5a5','#86efac','#fcd34d','#d8b4fe','#67e8f9','#fdba74','#f9a8d4'];
+let extraIdx = 0;
+const groupUrl = g => `${CELESTRAK}?GROUP=${encodeURIComponent(g)}&FORMAT=tle`;
+const IS_TOUCH = matchMedia('(pointer:coarse)').matches;
+const IS_IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+const IS_STANDALONE = navigator.standalone === true || matchMedia('(display-mode: standalone)').matches;
+
+/* =====================================================================
+ *  Persistent preferences (small; TLE text lives in Cache Storage)
+ * ===================================================================*/
+const PREF_KEY = 'uct:prefs:v1';
+const DEFAULT_PREFS = { lat: 31.2304, lon: 121.4737, mask: 10, fc: 2.0, groups: null, base: 'satnight', light: true, orbit: 'auto',
+  ring: 'line', links: true, track: true, colorBy: 'group', quality: IS_TOUCH ? 'bal' : 'max', tab: 'link', seenInstall: false };
+let prefs = Object.assign({}, DEFAULT_PREFS);
+try { Object.assign(prefs, JSON.parse(localStorage.getItem(PREF_KEY) || '{}')); } catch (e) {}
+let saveT;
+function savePrefs() { clearTimeout(saveT); saveT = setTimeout(() => { try { localStorage.setItem(PREF_KEY, JSON.stringify(prefs)); } catch (e) {} }, 300); }
+
+/* =====================================================================
+ *  State
+ * ===================================================================*/
+let viewer, scene;
+const groups = {};
+let allSats = [];
+let rr = 0;
+let lastSimMs = null;
+let selected = null, best = null;
+let pickMode = false, following = false;
+const UE = { lat: prefs.lat, lon: prefs.lon, mask: prefs.mask, fc: prefs.fc * 1e9 };
+let ueECEF, ueE, ueN, ueU;
+let gmstNow = 0;
+let ringMat = new Cesium.Matrix4();
+let selOrbit, linkLines, bestLine, trackEntity, footEntity, selEntity, ueEntity;
+let passCache = null;
+let layers = {};
+let compassOn = false, heading = null;
+let activeTab = 'link';
+let lastPointerType = 'mouse';
+const $ = id => document.getElementById(id);
+
+/* =====================================================================
+ *  Viewer
+ * ===================================================================*/
+function initViewer() {
+  viewer = new Cesium.Viewer('cesiumContainer', {
+    baseLayer: false, baseLayerPicker: false, geocoder: false, homeButton: false, sceneModePicker: false,
+    navigationHelpButton: false, animation: false, timeline: false, fullscreenButton: false, infoBox: false,
+    selectionIndicator: false, shouldAnimate: true, useBrowserRecommendedResolution: true, msaaSamples: 1,
+    creditContainer: document.createElement('div')
+  });
+  scene = viewer.scene;
+  const g = scene.globe;
+  g.enableLighting = prefs.light;
+  g.dynamicAtmosphereLighting = true;
+  g.dynamicAtmosphereLightingFromSun = true;
+  g.showGroundAtmosphere = true;
+  g.baseColor = Cesium.Color.fromCssColorString('#0b1a33');
+  g.nightFadeOutDistance = 4.0e7; g.nightFadeInDistance = 1.0e7;
+  g.tileCacheSize = IS_TOUCH ? 60 : 100;
+  scene.skyAtmosphere.show = true;
+  scene.fog.enabled = true;
+  scene.highDynamicRange = false;
+  viewer.screenSpaceEventHandler.removeInputAction(Cesium.ScreenSpaceEventType.LEFT_DOUBLE_CLICK);
+  applyQuality(prefs.quality);
+
+  const now = Cesium.JulianDate.now(), clk = viewer.clock;
+  clk.startTime = Cesium.JulianDate.addHours(now, -12, new Cesium.JulianDate());
+  clk.stopTime  = Cesium.JulianDate.addHours(now, 24, new Cesium.JulianDate());
+  clk.currentTime = now.clone();
+  clk.clockRange = Cesium.ClockRange.UNBOUNDED;
+  clk.multiplier = 1;
+
+  scene.camera.setView({ destination: Cesium.Cartesian3.fromDegrees(UE.lon, Math.max(-60, Math.min(60, UE.lat)), IS_TOUCH ? 3.2e7 : 2.6e7) });
+
+  buildLayers();
+  setBaseMap(prefs.base);
+
+  linkLines = scene.primitives.add(new Cesium.PolylineCollection());
+  selOrbit = scene.primitives.add(new Cesium.PolylineCollection());
+  bestLine = viewer.entities.add({ polyline: {
+    positions: new Cesium.CallbackProperty(() => (best && best.ecef) ? [ueCart(), best.ecef] : [], false),
+    width: 4, arcType: Cesium.ArcType.NONE,
+    material: new Cesium.PolylineGlowMaterialProperty({ glowPower: 0.25, color: Cesium.Color.fromCssColorString('#4ade80') }) } });
+
+  ueEntity = viewer.entities.add({
+    position: new Cesium.CallbackProperty(() => ueCart(), false),
+    billboard: { image: ueIcon(), width: 26, height: 26, verticalOrigin: Cesium.VerticalOrigin.CENTER,
+                 disableDepthTestDistance: Number.POSITIVE_INFINITY },
+    label: { text: 'UE', font: '600 12px -apple-system, Segoe UI, sans-serif', fillColor: Cesium.Color.fromCssColorString('#4ade80'),
+             outlineColor: Cesium.Color.BLACK, outlineWidth: 3, style: Cesium.LabelStyle.FILL_AND_OUTLINE,
+             pixelOffset: new Cesium.Cartesian2(0, -22), disableDepthTestDistance: Number.POSITIVE_INFINITY }
+  });
+  selEntity = viewer.entities.add({
+    show: false,
+    position: new Cesium.CallbackProperty(() => selected && selected.ecef, false),
+    billboard: { image: ringIcon(), width: 30, height: 30, color: Cesium.Color.WHITE },
+    label: { text: new Cesium.CallbackProperty(() => selected ? selected.name : '', false),
+             font: '600 13px -apple-system, Segoe UI, sans-serif', fillColor: Cesium.Color.WHITE, showBackground: true,
+             backgroundColor: Cesium.Color.fromCssColorString('rgba(8,12,22,0.8)'), backgroundPadding: new Cesium.Cartesian2(7, 4),
+             pixelOffset: new Cesium.Cartesian2(0, -26), verticalOrigin: Cesium.VerticalOrigin.BOTTOM }
+  });
+  footEntity = viewer.entities.add({
+    show: false,
+    position: new Cesium.CallbackProperty(() => (selected && Cesium.Cartesian3.magnitude(selected.sub) > 1) ? selected.sub : Cesium.Cartesian3.fromDegrees(0, 0), false),
+    ellipse: {
+      semiMajorAxis: new Cesium.CallbackProperty(() => footRadius(), false),
+      semiMinorAxis: new Cesium.CallbackProperty(() => footRadius(), false),
+      height: 0, material: Cesium.Color.fromCssColorString('#5ab0ff').withAlpha(0.13),
+      outline: true, outlineColor: Cesium.Color.fromCssColorString('#5ab0ff').withAlpha(0.8), outlineWidth: 1.5
+    }
+  });
+  trackEntity = viewer.entities.add({ show: false, polyline: { positions: [], width: 2, arcType: Cesium.ArcType.NONE,
+    material: new Cesium.PolylineDashMaterialProperty({ color: Cesium.Color.fromCssColorString('#fbbf24').withAlpha(0.85), dashLength: 14 }) } });
+
+  scene.preUpdate.addEventListener(onFrame);
+  scene.morphComplete.addEventListener(() => { for (const k in groups) applyGroupVis(groups[k]); $('fab2d').textContent = scene.mode === Cesium.SceneMode.SCENE2D ? '3D' : '2D'; });
+  setupInput();
+  setInterval(uiTick, 250);
+  setInterval(drawSky, 100);
+}
+
+function applyQuality(q) {
+  prefs.quality = q; savePrefs();
+  const dpr = window.devicePixelRatio || 1;
+  viewer.resolutionScale = q === 'max' ? Math.min(dpr, 3) : q === 'bal' ? Math.min(dpr, 1.5) : 1;
+  try { scene.msaaSamples = q === 'max' ? 4 : 1; } catch (e) {}
+  scene.postProcessStages.fxaa.enabled = q !== 'eco';
+  viewer.targetFrameRate = q === 'eco' ? 30 : undefined;
+  FRAME_BUDGET_MS = q === 'eco' ? 3 : q === 'bal' ? 5 : 6;
+  document.querySelectorAll('#qualSeg button').forEach(b => b.classList.toggle('on', b.dataset.q === q));
+}
+
+function buildLayers() {
+  const L = viewer.imageryLayers;
+  layers.sat = Cesium.ImageryLayer.fromProviderAsync(Cesium.ArcGisMapServerImageryProvider.fromUrl(
+    'https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer'));
+  layers.dark = new Cesium.ImageryLayer(new Cesium.UrlTemplateImageryProvider({
+    url: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png', subdomains: 'abcd', maximumLevel: 18,
+    credit: '© OpenStreetMap contributors © CARTO' }));
+  const nightProv = () => new Cesium.UrlTemplateImageryProvider({
+    url: 'https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/VIIRS_Black_Marble/default/2016-01-01/GoogleMapsCompatible_Level8/{z}/{y}/{x}.png',
+    maximumLevel: 8, credit: 'NASA GIBS / VIIRS Black Marble' });
+  layers.nightBlend = new Cesium.ImageryLayer(nightProv(), { dayAlpha: 0.0, nightAlpha: 1.0 });
+  layers.night = new Cesium.ImageryLayer(nightProv());
+  [layers.sat, layers.dark, layers.night, layers.nightBlend].forEach(l => { l.show = false; L.add(l); });
+}
+function setBaseMap(v) {
+  layers.sat.show = (v === 'sat' || v === 'satnight');
+  layers.nightBlend.show = (v === 'satnight');
+  layers.dark.show = (v === 'dark');
+  layers.night.show = (v === 'night');
+  prefs.base = v; savePrefs();
+}
+
+/* ---- sprite textures ---- */
+function glowSprite() {
+  const c = document.createElement('canvas'); c.width = c.height = 64; const x = c.getContext('2d');
+  const g = x.createRadialGradient(32, 32, 0, 32, 32, 32);
+  g.addColorStop(0, 'rgba(255,255,255,1)'); g.addColorStop(0.14, 'rgba(255,255,255,1)');
+  g.addColorStop(0.24, 'rgba(255,255,255,0.55)'); g.addColorStop(0.5, 'rgba(255,255,255,0.12)'); g.addColorStop(1, 'rgba(255,255,255,0)');
+  x.fillStyle = g; x.fillRect(0, 0, 64, 64); return c;
+}
+function ringIcon() {
+  const c = document.createElement('canvas'); c.width = c.height = 64; const x = c.getContext('2d');
+  x.strokeStyle = '#fff'; x.lineWidth = 4; x.beginPath(); x.arc(32, 32, 24, 0, 2 * Math.PI); x.stroke();
+  x.fillStyle = '#fff'; x.beginPath(); x.arc(32, 32, 7, 0, 2 * Math.PI); x.fill(); return c;
+}
+function ueIcon() {
+  const c = document.createElement('canvas'); c.width = c.height = 64; const x = c.getContext('2d');
+  x.fillStyle = 'rgba(74,222,128,0.25)'; x.beginPath(); x.arc(32, 32, 30, 0, 2 * Math.PI); x.fill();
+  x.fillStyle = '#4ade80'; x.strokeStyle = '#fff'; x.lineWidth = 4;
+  x.beginPath(); x.arc(32, 32, 12, 0, 2 * Math.PI); x.fill(); x.stroke(); return c;
+}
+let GLOW;
+
+/* =====================================================================
+ *  TLE fetch / cache / parse
+ *  Order: fresh cache (< 2 h) → CelesTrak → same-origin mirror (tle/<group>.txt,
+ *  refreshed by the GitHub Action) → stale cache. Cache = Cache Storage (no 5 MB
+ *  localStorage limit; Starlink alone is ~2 MB of TLE text).
+ * ===================================================================*/
+const TLE_CACHE = 'uct-tle-v1';
+async function tleCache() { try { return await caches.open(TLE_CACHE); } catch (e) { return null; } }
+async function cacheGet(url) {
+  const c = await tleCache(); if (!c) return null;
+  const r = await c.match(url); if (!r) return null;
+  return { t: +r.headers.get('x-saved') || 0, text: await r.text() };
+}
+async function cachePut(url, text) {
+  const c = await tleCache(); if (!c) return;
+  try { await c.put(url, new Response(text, { headers: { 'content-type': 'text/plain', 'x-saved': String(Date.now()) } })); } catch (e) {}
+}
+function mirrorUrl(url) {
+  const m = /[?&]GROUP=([^&]+)/.exec(url); return m ? `tle/${decodeURIComponent(m[1])}.txt` : null;
+}
+async function fetchText(url, force) {
+  const cached = await cacheGet(url);
+  if (url.startsWith(location.origin + '/__local_tle/')) { if (cached) return cached.text; throw new Error('local file no longer cached'); }
+  if (cached && !force && Date.now() - cached.t < TLE_TTL_MS) return cached.text;
+  const valid = t => /^\s*1 /m.test(t);
+  const tryGet = async u => { const r = await fetch(u, { cache: 'no-store' }); if (!r.ok) throw new Error('HTTP ' + r.status); const t = await r.text(); if (!valid(t)) throw new Error('no TLEs'); return t; };
+  try { const t = await tryGet(url); await cachePut(url, t); return t; }
+  catch (e1) {
+    const mu = mirrorUrl(url);
+    if (mu && location.protocol.startsWith('http')) {
+      try { const t = await tryGet(mu); await cachePut(url, t); toast('CelesTrak unreachable — using the app’s TLE mirror', null, 3500); return t; } catch (e2) {}
+    }
+    if (cached) { toast('Offline — using TLEs cached ' + new Date(cached.t).toLocaleString(), 'err', 5000); return cached.text; }
+    throw e1;
+  }
+}
+function parseTLE(text) {
+  const L = text.split(/\r?\n/).map(s => s.trimEnd()).filter(s => s.trim());
+  const out = [];
+  for (let i = 0; i < L.length; i++) {
+    const l1 = L[i].trim(), l2 = (L[i + 1] || '').trim();
+    if (l1.startsWith('1 ') && l2.startsWith('2 ') && l1.length >= 69) {
+      const prev = i > 0 ? L[i - 1].trim() : '';
+      const name = (prev && !prev.startsWith('1 ') && !prev.startsWith('2 ')) ? prev.replace(/^0\s+/, '') : 'NORAD ' + l1.slice(2, 7).trim();
+      try {
+        const rec = satellite.twoline2satrec(l1, l2);
+        if (!rec.error) out.push({ name, l1, l2, satrec: rec, norad: +l1.slice(2, 7) });
+      } catch (e) {}
+      i++;
+    }
+  }
+  return out;
+}
+
+/* =====================================================================
+ *  Groups
+ * ===================================================================*/
+const loading = new Set();
+function persistGroups() { prefs.groups = Object.values(groups).map(g => ({ key: g.key, label: g.label, url: g.url })); savePrefs(); }
+async function addGroup(key, label, url, colorHex, textOverride, quiet) {
+  if (groups[key]) { toast(label + ' is already loaded', null, 2000); return; }
+  if (loading.has(key)) return;
+  loading.add(key); renderCatalog();
+  toast('Loading ' + label + '…', 'busy');
+  let sats;
+  try { sats = parseTLE(textOverride != null ? textOverride : await fetchText(url)); }
+  catch (e) { loading.delete(key); renderCatalog(); toast('Could not load ' + label + ' (' + e.message + ')', 'err', 6000); return; }
+  loading.delete(key);
+  if (!sats.length) { renderCatalog(); toast('No satellites found for ' + label, 'err', 4000); return; }
+
+  const color = colorHex || COLORS[key] || EXTRA[extraIdx++ % EXTRA.length];
+  const ces = Cesium.Color.fromCssColorString(color);
+  const n = sats.length;
+  const size = n > 3000 ? (IS_TOUCH ? 8 : 7) : n > 800 ? 11 : n > 100 ? 15 : 20;
+  const bb = scene.primitives.add(new Cesium.BillboardCollection({ scene }));
+  const rings = { lines: scene.primitives.add(new Cesium.PolylineCollection()),
+                  dots: scene.primitives.add(new Cesium.PointPrimitiveCollection()) };
+  const tint = Cesium.Color.lerp(ces, Cesium.Color.WHITE, 0.3, new Cesium.Color());
+  const grp = { key, label, url, color, ces, sats, bb, rings, show: true, showRings: true, ringEpoch: null, visible: 0, tint };
+  const tNow = simMs();
+  sats.forEach((s, i) => {
+    s.group = grp; s.idx = i; s.ecef = new Cesium.Cartesian3(); s.sub = new Cesium.Cartesian3();
+    s.tk = NaN; s.valid = false; s.el = -90; s.az = 0;
+    s.bb = bb.add({ image: GLOW, color: ces, width: size, height: size, show: false,
+                    scaleByDistance: n > 3000 ? new Cesium.NearFarScalar(2.0e6, 1.8, 4.0e7, 0.8) : new Cesium.NearFarScalar(2.0e6, 1.6, 6.0e7, 0.7), id: s });
+    refreshState(s, tNow);
+  });
+  groups[key] = grp;
+  classifyShells(grp);
+  sats.forEach(classifyOrbit);
+  rebuildAll();
+  for (const s of sats) s.on = s.shell.show && TYPE_ON.reg.has(s.otype.reg) && TYPE_ON.inc.has(s.otype.inc);
+  buildRings(grp, tNow);
+  applyGroupVis(grp);
+  applyColors();
+  renderLegend(); renderCatalog();
+  if (url) persistGroups();
+  const ages = sats.map(s => ageDays(s, tNow)).sort((a, b) => a - b), med = ages[ages.length >> 1];
+  if (Math.abs(med) > 10) {
+    toast(`${label}: TLEs are ${med.toFixed(0)} days from sim time — SGP4 error grows fast.`, 'err', 12000,
+      { text: 'Jump to epoch', fn: () => jumpTo(epochMs(sats[ages.indexOf(med)] || sats[0])) });
+  } else if (!quiet) toast(`Loaded ${n.toLocaleString()} ${label} satellites`, null, 2500);
+  else hideToast();
+  return grp;
+}
+function removeGroup(key) {
+  const g = groups[key]; if (!g) return;
+  if (selected && selected.group === g) select(null);
+  scene.primitives.remove(g.bb); scene.primitives.remove(g.rings.lines); scene.primitives.remove(g.rings.dots);
+  delete groups[key]; rebuildAll(); renderLegend(); renderTypeFilter(); renderCatalog(); persistGroups();
+}
+function rebuildAll() { allSats = []; for (const k in groups) allSats.push(...groups[k].sats); rr = 0; best = null; }
+function isShown(s) { return s.group.show && s.on; }
+function shownCount(g) { let n = 0; for (const s of g.sats) if (s.on) n++; return g.show ? n : 0; }
+
+/* ---- Orbit-type classification (mean elements from the TLE) ----
+ * Regime:  HEO e > 0.25 · LEO a−Re < 2000 km · GEO |n − 1.0027 rev/day| < 0.02, i < 15° (IGSO i ≥ 15°) · MEO otherwise
+ * Plane:   SSO when J2 nodal rate ≈ +0.9856°/day · Equatorial i<10° · Polar 80–100° · Retrograde > 100° · Inclined otherwise */
+const J2 = 1.08262668e-3;
+const REGIMES = [
+  { k: 'LEO', label: 'LEO', color: '#38bdf8', tip: 'Low Earth orbit, altitude < 2 000 km' },
+  { k: 'MEO', label: 'MEO', color: '#a78bfa', tip: 'Medium Earth orbit' },
+  { k: 'GEO', label: 'GEO', color: '#fbbf24', tip: 'Geostationary' },
+  { k: 'IGSO', label: 'IGSO', color: '#fb923c', tip: 'Inclined geosynchronous' },
+  { k: 'HEO', label: 'HEO', color: '#f472b6', tip: 'Highly elliptical, e > 0.25' }];
+const INCS = [
+  { k: 'EQU', label: 'Equatorial', color: '#fde047', tip: 'i < 10°' },
+  { k: 'INC', label: 'Inclined', color: '#4ade80', tip: '10° ≤ i < 80°' },
+  { k: 'POL', label: 'Polar', color: '#60a5fa', tip: '80° ≤ i ≤ 100°, not SSO' },
+  { k: 'SSO', label: 'Sun-sync', color: '#f87171', tip: 'Node precesses +0.9856°/day' },
+  { k: 'RET', label: 'Retrograde', color: '#c084fc', tip: 'i > 100°, not SSO' }];
+const TYPE_ON = { reg: new Set(REGIMES.map(x => x.k)), inc: new Set(INCS.map(x => x.k)) };
+function classifyOrbit(s) {
+  const r = s.satrec, n = r.no / 60, a = Math.cbrt(MU / (n * n)), e = r.ecco, i = r.inclo * 180 / Math.PI;
+  const revDay = r.no * 1440 / (2 * Math.PI), p = a * (1 - e * e);
+  const dOmega = -1.5 * n * J2 * (RE / p) ** 2 * Math.cos(r.inclo) * 86400 * 180 / Math.PI;
+  let reg;
+  if (e > 0.25) reg = 'HEO';
+  else if (a - RE < 2000) reg = 'LEO';
+  else if (Math.abs(revDay - 1.0027) < 0.02) reg = i < 15 ? 'GEO' : 'IGSO';
+  else reg = 'MEO';
+  let inc;
+  if (Math.abs(dOmega - 0.9856) < 0.2 && i > 90) inc = 'SSO';
+  else if (i < 10 || i > 170) inc = 'EQU';
+  else if (i < 80) inc = 'INC';
+  else if (i <= 100) inc = 'POL';
+  else inc = 'RET';
+  s.otype = { reg, inc, dOmega, i, a, e };
+}
+function typeColor(s, by) { return (by === 'reg' ? REGIMES : INCS).find(x => x.k === s.otype[by]).color; }
+function updateVisFlags() {
+  for (const s of allSats) s.on = s.shell.show && TYPE_ON.reg.has(s.otype.reg) && TYPE_ON.inc.has(s.otype.inc);
+  if (selected && !isShown(selected)) select(null);
+  for (const k in groups) { groups[k].ringsDirty = true; applyGroupVis(groups[k]); }
+}
+function applyColors() {
+  const by = $('colorBy').value;
+  for (const s of allSats) {
+    s.col = by === 'group' ? s.group.color : typeColor(s, by);
+    s.bb.color = by === 'group' ? s.group.ces : Cesium.Color.fromCssColorString(s.col);
+  }
+  renderTypeFilter();
+}
+/* tap = toggle, press-and-hold (or shift-click) = "only this one" */
+function bindChip(el, fn) {
+  let t = null, held = false;
+  el.addEventListener('pointerdown', () => { held = false; t = setTimeout(() => { held = true; fn(true); }, 450); });
+  const cancel = () => clearTimeout(t);
+  el.addEventListener('pointerup', cancel); el.addEventListener('pointerleave', cancel); el.addEventListener('pointercancel', cancel);
+  el.addEventListener('contextmenu', e => e.preventDefault());
+  el.addEventListener('click', e => { clearTimeout(t); if (!held) fn(e.shiftKey); held = false; });
+}
+function renderTypeFilter() {
+  $('typeSec').style.display = allSats.length ? '' : 'none';
+  const by = $('colorBy').value;
+  const draw = (el, list, axis) => {
+    const cnt = {}; list.forEach(x => cnt[x.k] = 0);
+    for (const k in groups) if (groups[k].show) for (const s of groups[k].sats) if (s.shell.show) cnt[s.otype[axis]]++;
+    el.innerHTML = list.map(x => `<button class="tc${TYPE_ON[axis].has(x.k) ? ' on' : ''}${cnt[x.k] ? '' : ' zero'}" data-k="${x.k}" title="${x.tip}">
+      <span class="d" style="background:${by === axis ? x.color : 'var(--tx2)'}"></span>${x.label} <b>${cnt[x.k].toLocaleString()}</b></button>`).join('');
+    el.querySelectorAll('.tc').forEach(b => bindChip(b, only => {
+      const S = TYPE_ON[axis], k = b.dataset.k;
+      if (only) { S.clear(); S.add(k); } else S.has(k) ? S.delete(k) : S.add(k);
+      updateVisFlags(); renderTypeFilter(); renderLegend();
+    }));
+  };
+  draw($('regChips'), REGIMES, 'reg'); draw($('incChips'), INCS, 'inc');
+}
+function ringsWanted() { const m = $('orbitMode').value; return m === 'all' || m === 'auto'; }
+function applyGroupVis(g) {
+  g.bb.show = g.show;
+  const want = g.show && g.showRings && ringsWanted() && scene.mode === Cesium.SceneMode.SCENE3D;
+  if (want && g.ringsDirty) buildRings(g, simMs());
+  const dotted = $('ringStyle').value === 'dots';
+  g.rings.lines.show = want && !dotted; g.rings.dots.show = want && dotted;
+  selOrbit.show = !!selected && $('orbitMode').value !== 'off' && scene.mode === Cesium.SceneMode.SCENE3D;
+}
+/* Shells: 2-D histogram over (inclination 0.05°, altitude 20 km), 8-connected populated cells → shells; rest = "other". */
+function classifyShells(g) {
+  const n = g.sats.length, minCell = Math.max(6, 0.004 * n), minShell = Math.max(12, 0.015 * n);
+  const cells = new Map();
+  for (const s of g.sats) {
+    const r = s.satrec, w = r.no / 60, a = Math.cbrt(MU / (w * w)), inc = r.inclo * 180 / Math.PI, alt = a - RE;
+    const ci = Math.round(inc / 0.05), ca = Math.round(alt / 20), k = ci + ',' + ca;
+    if (!cells.has(k)) cells.set(k, { ci, ca, rows: [] });
+    cells.get(k).rows.push({ s, inc, alt });
+  }
+  const seen = new Set(), shells = [], other = { key: 'other', label: 'other', sats: [], show: true };
+  for (const [k, c] of cells) {
+    if (seen.has(k)) continue;
+    if (c.rows.length < minCell) { seen.add(k); other.sats.push(...c.rows.map(r => r.s)); continue; }
+    const comp = [], stack = [k]; seen.add(k);
+    while (stack.length) {
+      const cc = cells.get(stack.pop()); comp.push(...cc.rows);
+      for (let di = -1; di <= 1; di++) for (let da = -1; da <= 1; da++) {
+        const nk = (cc.ci + di) + ',' + (cc.ca + da), nc = cells.get(nk);
+        if (nc && !seen.has(nk) && nc.rows.length >= minCell) { seen.add(nk); stack.push(nk); }
+      }
+    }
+    if (comp.length < minShell) { other.sats.push(...comp.map(r => r.s)); continue; }
+    const inc = comp.reduce((t, r) => t + r.inc, 0) / comp.length, alt = comp.reduce((t, r) => t + r.alt, 0) / comp.length;
+    shells.push({ key: inc.toFixed(2) + '/' + alt.toFixed(0), label: `${inc.toFixed(1)}° · ${alt.toFixed(0)} km`, inc, alt, sats: comp.map(r => r.s), show: true });
+  }
+  shells.sort((a, b) => a.inc - b.inc || a.alt - b.alt);
+  if (other.sats.length) shells.push(other);
+  for (const sh of shells) for (const s of sh.sats) s.shell = sh;
+  g.shells = shells;
+}
+function setShell(g, sh, only) {
+  if (sh === 'all') g.shells.forEach(x => x.show = true);
+  else if (only) g.shells.forEach(x => x.show = (x === sh));
+  else sh.show = !sh.show;
+  updateVisFlags(); renderLegend(); renderTypeFilter();
+}
+
+/* Osculating two-body ellipse per orbital plane, drawn in the inertial frame with modelMatrix = Rz(−GMST). */
+function buildRings(g, tNow) {
+  g.rings.lines.removeAll(); g.rings.dots.removeAll(); g.ringEpoch = tNow; g.ringsDirty = false; g.ringsSuppressed = false;
+  if (!(g.show && g.showRings && ringsWanted())) { g.ringsDirty = true; return; }
+  const planes = [];
+  for (const s of g.sats) {
+    if (!s.valid || !s.on) continue;
+    const o = orbitDots(s, 8); if (!o) continue;
+    const w = s.satrec.no / 60, am = Math.cbrt(MU / (w * w));
+    if (planes.some(q => Math.abs(q.inc - o.inc) < 0.3 && Math.abs(q.am - am) < 25 &&
+                         Math.abs(((q.raan - o.raan + 540) % 360) - 180) < 1.5)) continue;
+    planes.push({ inc: o.inc, am, raan: o.raan });
+    if ($('orbitMode').value === 'auto' && planes.length > AUTO_MAX_PLANES) {
+      g.rings.lines.removeAll(); g.ringsSuppressed = true; return;
+    }
+    planes[planes.length - 1].s = s;
+  }
+  const np = planes.length, dotted = $('ringStyle').value === 'dots';
+  const alpha = np > 100 ? 0.3 : np > 40 ? 0.42 : 0.6;
+  const mat = Cesium.Material.fromType('Color', { color: g.tint.withAlpha(alpha) });
+  const dotCol = g.tint.withAlpha(Math.min(1, alpha + 0.3));
+  for (const q of planes) {
+    const o = orbitDots(q.s, dotted ? RING_DOTS : RING_PTS); if (!o) continue;
+    if (dotted) for (const pos of o.pts) g.rings.dots.add({ position: pos, pixelSize: 3.5, color: dotCol });
+    else { o.pts.push(o.pts[0]); g.rings.lines.add({ positions: o.pts, width: 1.3, material: mat }); }
+  }
+  g.ringsSuppressed = false;
+  g.ringEpoch = tNow;
+}
+function orbitDots(s, NP) {
+  const r = [s.rx, s.ry, s.rz], v = [s.vx, s.vy, s.vz];
+  const rm = Math.hypot(...r), v2 = v[0] * v[0] + v[1] * v[1] + v[2] * v[2];
+  const h = cross(r, v), hm = Math.hypot(...h);
+  const a = 1 / (2 / rm - v2 / MU); if (!(a > 0)) return null;
+  const vxh = cross(v, h);
+  const ev = [vxh[0] / MU - r[0] / rm, vxh[1] / MU - r[1] / rm, vxh[2] / MU - r[2] / rm];
+  if (Math.hypot(...ev) >= 0.98) return null;
+  const W = h.map(x => x / hm);
+  let N = [-W[1], W[0], 0]; const nm = Math.hypot(N[0], N[1]);
+  N = nm > 1e-6 ? [N[0] / nm, N[1] / nm, 0] : [1, 0, 0];
+  const M = cross(W, N), p = hm * hm / MU;
+  const ec = ev[0] * N[0] + ev[1] * N[1] + ev[2] * N[2], es = ev[0] * M[0] + ev[1] * M[1] + ev[2] * M[2];
+  const pts = [];
+  for (let k = 0; k < NP; k++) {
+    const u = 2 * Math.PI * k / NP, cu = Math.cos(u), su = Math.sin(u), rr = p / (1 + ec * cu + es * su) * 1e3;
+    pts.push(new Cesium.Cartesian3(rr * (cu * N[0] + su * M[0]), rr * (cu * N[1] + su * M[1]), rr * (cu * N[2] + su * M[2])));
+  }
+  return { pts, a, raan: Math.atan2(N[1], N[0]) * 180 / Math.PI, inc: Math.acos(Math.max(-1, Math.min(1, W[2]))) * 180 / Math.PI };
+}
+
+/* =====================================================================
+ *  Propagation: SGP4 round-robin under a per-frame budget, 3rd-order f/g series in between.
+ * ===================================================================*/
+function simMs() { return Cesium.JulianDate.toDate(viewer.clock.currentTime).getTime(); }
+function epochMs(s) { return (s.satrec.jdsatepoch - 2440587.5) * 86400000 + (s.satrec.jdsatepochF || 0) * 86400000; }
+function ageDays(s, t) { return (t - epochMs(s)) / 86400000; }
+function refreshState(s, tMs) {
+  let pv;
+  try { pv = satellite.propagate(s.satrec, new Date(tMs)); } catch (e) { pv = null; }
+  if (!pv || !pv.position || !pv.velocity || isNaN(pv.position.x)) { s.valid = false; s.tk = tMs; return; }
+  s.rx = pv.position.x; s.ry = pv.position.y; s.rz = pv.position.z;
+  s.vx = pv.velocity.x; s.vy = pv.velocity.y; s.vz = pv.velocity.z;
+  s.tk = tMs; s.valid = true;
+}
+function extrap(s, tMs, out, outV) {
+  const dt = (tMs - s.tk) / 1000;
+  const r2 = s.rx * s.rx + s.ry * s.ry + s.rz * s.rz, r = Math.sqrt(r2);
+  const u = MU / (r2 * r), p = (s.rx * s.vx + s.ry * s.vy + s.rz * s.vz) / r2;
+  const dt2 = dt * dt, dt3 = dt2 * dt;
+  const f = 1 - 0.5 * u * dt2 + 0.5 * u * p * dt3, g = dt - u * dt3 / 6;
+  out[0] = f * s.rx + g * s.vx; out[1] = f * s.ry + g * s.vy; out[2] = f * s.rz + g * s.vz;
+  if (outV) {
+    const fd = -u * dt + 1.5 * u * p * dt2, gd = 1 - 0.5 * u * dt2;
+    outV[0] = fd * s.rx + gd * s.vx; outV[1] = fd * s.ry + gd * s.vy; outV[2] = fd * s.rz + gd * s.vz;
+  }
+}
+const _r = [0, 0, 0], _v = [0, 0, 0];
+function temeToEcef(r, v, th, outR, outV) {
+  const c = Math.cos(th), s = Math.sin(th);
+  outR[0] = c * r[0] + s * r[1]; outR[1] = -s * r[0] + c * r[1]; outR[2] = r[2];
+  if (v && outV) {
+    outV[0] = c * v[0] + s * v[1] + OMEGA_E * outR[1];
+    outV[1] = -s * v[0] + c * v[1] - OMEGA_E * outR[0];
+    outV[2] = v[2];
+  }
+}
+const _e = [0, 0, 0], _ev = [0, 0, 0];
+
+function onFrame() {
+  if (!allSats.length) { lastSimMs = simMs(); return; }
+  const t = simMs(), date = new Date(t);
+  gmstNow = satellite.gstime(date);
+  const jumped = lastSimMs !== null && Math.abs(t - lastSimMs) > 30 * 60 * 1000;
+  lastSimMs = t;
+  if (jumped) { for (const s of allSats) refreshState(s, t); }
+  else {
+    const t0 = performance.now(), N = allSats.length, lim = REFRESH_S * 1000;
+    for (let k = 0; k < N; k++) {
+      const s = allSats[rr]; rr = (rr + 1) % N;
+      if (!(Math.abs(t - s.tk) < lim)) refreshState(s, t);
+      if ((k & 63) === 63 && performance.now() - t0 > FRAME_BUDGET_MS) break;
+    }
+  }
+  const c = Math.cos(gmstNow), sn = Math.sin(gmstNow);
+  Cesium.Matrix4.fromRotationTranslation(new Cesium.Matrix3(c, sn, 0, -sn, c, 0, 0, 0, 1), Cesium.Cartesian3.ZERO, ringMat);
+  for (const k in groups) {
+    const g = groups[k];
+    g.rings.lines.modelMatrix = ringMat; g.rings.dots.modelMatrix = ringMat;
+    if (jumped || Math.abs(t - g.ringEpoch) > RING_REBUILD_S * 1000) buildRings(g, t);
+  }
+  selOrbit.modelMatrix = ringMat;
+  if (selected && (jumped || Math.abs(t - selOrbitT) > 10 * 60000)) buildSelOrbit();
+  const mask = UE.mask; let bestEl = -1e9; best = null;
+  for (const k in groups) groups[k].visible = 0;
+  for (const s of allSats) {
+    if (!s.valid || !s.on) { s.bb.show = false; if (!s.valid) { s.el = -90; continue; } }
+    extrap(s, t, _r);
+    temeToEcef(_r, null, gmstNow, _e);
+    s.ecef.x = _e[0] * 1e3; s.ecef.y = _e[1] * 1e3; s.ecef.z = _e[2] * 1e3;
+    s.bb.position = s.ecef; if (s.on) s.bb.show = true;
+    const dx = _e[0] - ueECEF[0], dy = _e[1] - ueECEF[1], dz = _e[2] - ueECEF[2];
+    const rho = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    const up = (dx * ueU[0] + dy * ueU[1] + dz * ueU[2]) / rho;
+    s.el = Math.asin(up) * 180 / Math.PI;
+    if (s.el > 0) s.az = (Math.atan2(dx * ueE[0] + dy * ueE[1], dx * ueN[0] + dy * ueN[1] + dz * ueN[2]) * 180 / Math.PI + 360) % 360;
+    if (s.el >= mask && isShown(s)) { s.group.visible++; if (s.el > bestEl) { bestEl = s.el; best = s; } }
+  }
+  updateSub();
+  updateLinks();
+}
+function updateLinks() {
+  const on = $('tLinks').checked;
+  const vis = on ? allSats.filter(s => s.valid && isShown(s) && s.el >= UE.mask && s !== best)
+                          .sort((a, b) => b.el - a.el).slice(0, MAX_LINKS - 1) : [];
+  const ue = ueCart();
+  while (linkLines.length < vis.length) linkLines.add({ width: 1, arcType: Cesium.ArcType.NONE,
+    material: Cesium.Material.fromType('Color', { color: Cesium.Color.WHITE.withAlpha(0.35) }) });
+  for (let i = 0; i < linkLines.length; i++) {
+    const L = linkLines.get(i);
+    if (i < vis.length) {
+      const s = vis[i]; L.show = true; L.positions = [ue, s.ecef];
+      if (L._grp !== s.group) { L.material.uniforms.color = s.group.ces.withAlpha(0.45); L._grp = s.group; }
+    } else L.show = false;
+  }
+  bestLine.show = !!best;
+}
+
+/* =====================================================================
+ *  UE / geometry
+ * ===================================================================*/
+let _ueCart = new Cesium.Cartesian3();
+function ueCart() { return _ueCart; }
+function setUE(lat, lon) {
+  UE.lat = lat; UE.lon = lon;
+  const c = Cesium.Cartesian3.fromDegrees(lon, lat, 0);
+  _ueCart = c;
+  ueECEF = [c.x / 1e3, c.y / 1e3, c.z / 1e3];
+  const f = lat * Math.PI / 180, l = lon * Math.PI / 180;
+  ueE = [-Math.sin(l), Math.cos(l), 0];
+  ueN = [-Math.sin(f) * Math.cos(l), -Math.sin(f) * Math.sin(l), Math.cos(f)];
+  ueU = [Math.cos(f) * Math.cos(l), Math.cos(f) * Math.sin(l), Math.sin(f)];
+  $('ueLat').value = lat.toFixed(4);
+  $('ueLon').value = lon.toFixed(4);
+  $('ueName').textContent = `UE ${Math.abs(lat).toFixed(3)}°${lat >= 0 ? 'N' : 'S'} ${Math.abs(lon).toFixed(3)}°${lon >= 0 ? 'E' : 'W'} · mask ${UE.mask}°`;
+  passCache = null;
+  prefs.lat = lat; prefs.lon = lon; savePrefs();
+}
+function linkAt(s, tMs) {
+  extrap(s, tMs, _r, _v);
+  const th = satellite.gstime(new Date(tMs));
+  temeToEcef(_r, _v, th, _e, _ev);
+  const d = [_e[0] - ueECEF[0], _e[1] - ueECEF[1], _e[2] - ueECEF[2]];
+  const rho = Math.hypot(...d);
+  const rdot = (d[0] * _ev[0] + d[1] * _ev[1] + d[2] * _ev[2]) / rho;
+  const el = Math.asin((d[0] * ueU[0] + d[1] * ueU[1] + d[2] * ueU[2]) / rho) * 180 / Math.PI;
+  const az = (Math.atan2(d[0] * ueE[0] + d[1] * ueE[1], d[0] * ueN[0] + d[1] * ueN[1] + d[2] * ueN[2]) * 180 / Math.PI + 360) % 360;
+  const alt = Math.hypot(..._e) - RE;
+  const spd = Math.hypot(..._v);
+  return { rho, rdot, el, az, alt, spd };
+}
+function linkSGP4(s, tMs) {
+  const pv = satellite.propagate(s.satrec, new Date(tMs));
+  if (!pv || !pv.position) return null;
+  const th = satellite.gstime(new Date(tMs));
+  temeToEcef([pv.position.x, pv.position.y, pv.position.z], [pv.velocity.x, pv.velocity.y, pv.velocity.z], th, _e, _ev);
+  const d = [_e[0] - ueECEF[0], _e[1] - ueECEF[1], _e[2] - ueECEF[2]], rho = Math.hypot(...d);
+  return { el: Math.asin((d[0] * ueU[0] + d[1] * ueU[1] + d[2] * ueU[2]) / rho) * 180 / Math.PI,
+           rdot: (d[0] * _ev[0] + d[1] * _ev[1] + d[2] * _ev[2]) / rho, rho };
+}
+function updateSub() {
+  if (!selected || !selected.valid || Cesium.Cartesian3.magnitude(selected.ecef) < 1) return;
+  const cg = Cesium.Cartographic.fromCartesian(selected.ecef);
+  if (cg) Cesium.Cartesian3.fromRadians(cg.longitude, cg.latitude, 0, Cesium.Ellipsoid.WGS84, selected.sub);
+}
+function footRadius() {             // λ = acos(Re/(Re+h)·cos ε) − ε
+  if (!selected || !selected.valid) return 1;
+  const h = Math.hypot(selected.ecef.x, selected.ecef.y, selected.ecef.z) / 1e3 - RE;
+  const eps = UE.mask * Math.PI / 180;
+  const lam = Math.acos(RE / (RE + h) * Math.cos(eps)) - eps;
+  return Math.max(1, RE * lam * 1e3);
+}
+
+/* =====================================================================
+ *  Selection, passes, ground track
+ * ===================================================================*/
+let selOrbitT = 0;
+function buildSelOrbit() {
+  selOrbit.removeAll(); selOrbitT = simMs();
+  if (!selected || !selected.valid) return;
+  const o = orbitDots(selected, 180); if (!o) return;
+  o.pts.push(o.pts[0]);
+  selOrbit.add({ positions: o.pts, width: 1.5, material: Cesium.Material.fromType('Color', {
+    color: Cesium.Color.lerp(selected.group.ces, Cesium.Color.WHITE, 0.6, new Cesium.Color()).withAlpha(0.85) }) });
+}
+function select(s) {
+  selected = s; passCache = null; updateSub(); buildSelOrbit();
+  for (const k in groups) applyGroupVis(groups[k]);
+  selEntity.show = !!s;
+  footEntity.show = !!s && $('tTrack').checked;
+  trackEntity.show = !!s && $('tTrack').checked;
+  $('selBox').style.display = s ? '' : 'none';
+  $('linkHint').style.display = s ? 'none' : '';
+  if (!s && following) setFollow(false);
+  if (s) { buildTrack(); renderMeta(); computePasses(); }
+  uiTick();
+}
+function buildTrack() {
+  if (!selected) return;
+  const s = selected, t = simMs(), P = 2 * Math.PI / s.satrec.no;
+  const span = Math.min(P, 24 * 60), step = Math.max(0.5, span / 240), pos = [];
+  for (let m = -span * 0.5; m <= span * 1.0; m += step) {
+    const tm = t + m * 60000, pv = satellite.propagate(s.satrec, new Date(tm));
+    if (!pv || !pv.position) continue;
+    const gd = satellite.eciToGeodetic(pv.position, satellite.gstime(new Date(tm)));
+    pos.push(Cesium.Cartesian3.fromRadians(gd.longitude, gd.latitude, 15000));
+  }
+  trackEntity.polyline.positions = pos; s._trackT = t;
+}
+function renderMeta() {
+  const s = selected, r = s.satrec, t = simMs();
+  const n = r.no / 60, a = Math.cbrt(MU / (n * n));
+  const rows = [
+    ['NORAD ID', s.norad], ['Group', s.group.label],
+    ['Orbit type', `${s.otype.reg} · ${INCS.find(x => x.k === s.otype.inc).label}`],
+    ['Node drift (J2)', (s.otype.dOmega >= 0 ? '+' : '') + s.otype.dOmega.toFixed(3) + ' °/day'],
+    ['Inclination', (r.inclo * 180 / Math.PI).toFixed(2) + '°'], ['RAAN', (r.nodeo * 180 / Math.PI).toFixed(2) + '°'],
+    ['Eccentricity', r.ecco.toFixed(5)], ['Period', (2 * Math.PI / r.no).toFixed(2) + ' min'],
+    ['Perigee / apogee', `${(a * (1 - r.ecco) - RE).toFixed(0)} / ${(a * (1 + r.ecco) - RE).toFixed(0)} km`],
+    ['TLE epoch', new Date(epochMs(s)).toISOString().slice(0, 16).replace('T', ' ') + 'Z'],
+    ['TLE age', ageBadge(ageDays(s, t))]
+  ];
+  $('meta').innerHTML = rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
+}
+function ageBadge(d) {
+  const a = Math.abs(d), cls = a < 3 ? 'ok' : a < 14 ? 'old' : 'bad';
+  return `<span class="age ${cls}">${d.toFixed(1)} d</span>`;
+}
+function computePasses() {
+  const s = selected; if (!s) return;
+  const t0 = simMs(), P = 2 * Math.PI / s.satrec.no;
+  const step = (P < 200 ? 20 : 120) * 1000, end = t0 + 24 * 3600e3, mask = UE.mask;
+  const passes = []; let prev = linkSGP4(s, t0), cur = null;
+  if (prev && prev.el >= mask) {
+    let tb = t0, Lb = prev, Lp, mx = prev.el;
+    for (let k = 0; k < 240; k++) { Lp = linkSGP4(s, tb - 10000); if (!Lp || Lp.el < mask) break; tb -= 10000; Lb = Lp; mx = Math.max(mx, Lp.el); }
+    const aos = (Lp && Lp.el < mask) ? tb - 10000 * (Lb.el - mask) / (Lb.el - Lp.el) : tb;
+    cur = { aos, max: mx, tmax: t0, inProg: true };
+  }
+  for (let t = t0 + step; t <= end && passes.length < 8; t += step) {
+    const L = linkSGP4(s, t); if (!L || !prev) { prev = L; continue; }
+    const tc = t - step + step * (mask - prev.el) / (L.el - prev.el);
+    if (!cur && L.el >= mask) cur = { aos: tc, max: L.el, tmax: t };
+    else if (cur && L.el >= mask) { if (L.el > cur.max) { cur.max = L.el; cur.tmax = t; } }
+    else if (cur && L.el < mask) { cur.los = tc; passes.push(cur); cur = null; }
+    prev = L;
+  }
+  if (cur) { cur.los = null; passes.push(cur); }
+  let curve = null;
+  const fp = passes[0];
+  if (fp) {
+    const a = fp.aos, b = fp.los || end, N = 160; curve = [];
+    for (let i = 0; i <= N; i++) {
+      const t = a + (b - a) * i / N, L = linkSGP4(s, t);
+      if (L) curve.push({ t, el: L.el, fd: -UE.fc * L.rdot / C_KMS });
+    }
+  }
+  passCache = { sat: s, t0, passes, curve, fc: UE.fc, mask };
+  const fmt = t => new Date(t).toISOString().slice(11, 19);
+  const fmtD = t => new Date(t).toISOString().slice(5, 10);
+  $('passes').innerHTML = passes.length
+    ? `<div class="ps h"><span>AOS (UTC)</span><span>dur</span><span>max el</span></div>` +
+      passes.map((p, i) => `<div class="ps${p.inProg ? ' now' : ''}" data-i="${i}"><span>${fmtD(p.aos)} ${fmt(p.aos)}</span>
+        <span>${p.los ? ((p.los - p.aos) / 60000).toFixed(1) + 'm' : '—'}</span><span>${p.max.toFixed(1)}°</span></div>`).join('')
+    : `<div class="empty">No pass above ${mask}° in the next 24 h${P > 1300 ? ' (GEO/GSO: fixed geometry)' : ''}.</div>`;
+  document.querySelectorAll('#passes .ps[data-i]').forEach(el => el.onclick = () => {
+    const p = passes[+el.dataset.i]; jumpTo(Math.max(p.aos - 60000, simMs() - 1));
+  });
+  $('passLbl').textContent = fp ? (fp.inProg ? 'in progress' : 'AOS ' + fmt(fp.aos)) : '';
+}
+
+/* =====================================================================
+ *  UI refresh
+ * ===================================================================*/
+function uiTick() {
+  if (!viewer) return;
+  const t = simMs(), d = new Date(t), iso = d.toISOString();
+  const off = Math.abs(t - Date.now()) > 5000;
+  $('clock').innerHTML = (IS_TOUCH && innerWidth < 420 ? iso.slice(5, 19) : iso.slice(0, 19)).replace('T', ' ') + '<small>UTC</small>';
+  $('clock').classList.toggle('off', off);
+  $('btnNow').style.opacity = off || viewer.clock.multiplier !== 1 ? 1 : 0.45;
+  let tot = 0, vis = 0;
+  for (const k in groups) { const g = groups[k]; if (g.show) { tot += shownCount(g); vis += g.visible; } }
+  $('cTot').textContent = tot.toLocaleString(); $('cVis').textContent = vis;
+  document.querySelectorAll('#legend .lg').forEach(el => { const g = groups[el.dataset.k]; if (g) el.querySelector('.ct b').textContent = g.visible; });
+
+  const tgt = (selected && selected.valid) ? selected : best;
+  if (!tgt) {
+    $('tBadge').className = 'badge none'; $('tBadge').textContent = '—';
+    $('tName').textContent = allSats.length ? 'No satellite above mask' : (loading.size ? 'Loading…' : 'No constellation loaded');
+    $('tSub').textContent = allSats.length ? `${tot.toLocaleString()} sats · nothing above ${UE.mask}° right now` : 'Open Layers to add one';
+    $('pkEl').textContent = '—'; $('pkDop').textContent = '';
+    ['vEl', 'vAz', 'vRng', 'vDly', 'vDop', 'vDr', 'vFspl', 'vAlt'].forEach(i => $(i).textContent = '—');
+  } else {
+    const L = linkAt(tgt, t), L1 = linkAt(tgt, t + 1000);
+    const fd = -UE.fc * L.rdot / C_KMS, fd1 = -UE.fc * L1.rdot / C_KMS;
+    const isSel = tgt === selected;
+    const elCol = L.el >= UE.mask ? 'var(--ok)' : L.el < 0 ? 'var(--tx3)' : 'var(--warn)';
+    $('tBadge').className = 'badge ' + (isSel ? 'sel' : 'srv'); $('tBadge').textContent = isSel ? 'Selected' : 'Serving';
+    $('tName').textContent = tgt.name;
+    $('tSub').innerHTML = `<span style="color:${tgt.group.color}">●</span> ${tgt.group.label} · ${vis} of ${tot.toLocaleString()} in view` +
+      (isSel && L.el < UE.mask ? ' · <span style="color:var(--warn)">below mask</span>' : '');
+    $('pkEl').innerHTML = `<span style="color:${elCol}">${L.el.toFixed(1)}</span><small>° el</small>`;
+    $('pkDop').innerHTML = `${(fd / 1e3).toFixed(2)} kHz`;
+    $('vEl').innerHTML = `${L.el.toFixed(2)}<small>°</small>`; $('vEl').style.color = elCol;
+    $('vAz').innerHTML = `${L.az.toFixed(1)}<small>°</small>`;
+    $('vRng').innerHTML = `${L.rho.toFixed(0)}<small>km</small>`;
+    $('vDly').innerHTML = `${(L.rho / C_KMS * 1e3).toFixed(3)}<small>ms</small>`;
+    $('vDop').innerHTML = `${(fd / 1e3).toFixed(2)}<small>kHz</small>`;
+    $('vDr').innerHTML = `${(fd1 - fd).toFixed(1)}<small>Hz/s</small>`;
+    $('vFspl').innerHTML = `${(20 * Math.log10(4 * Math.PI * L.rho * 1e3 * UE.fc / 299792458)).toFixed(1)}<small>dB</small>`;
+    $('vAlt').innerHTML = `${L.alt.toFixed(0)}<small>km</small>`;
+  }
+  if (selected) {
+    if (!passCache || passCache.sat !== selected || passCache.fc !== UE.fc || passCache.mask !== UE.mask ||
+        Math.abs(t - passCache.t0) > 6 * 3600e3 || (passCache.passes[0] && passCache.passes[0].los && t > passCache.passes[0].los) ||
+        t < passCache.t0 - 60000) { computePasses(); renderMeta(); }
+    if (Math.abs(t - (selected._trackT || 0)) > 10 * 60000) buildTrack();
+    if (activeTab === 'link') drawDoppler();
+  }
+  if (activeTab === 'sky') renderVisList(t);
+}
+
+/* ---- in-view list (Sky tab) ---- */
+let visRows = [];
+function renderVisList(t) {
+  const list = allSats.filter(s => s.valid && isShown(s) && s.el >= UE.mask).sort((a, b) => b.el - a.el).slice(0, 15);
+  if (selected && selected.valid && !list.includes(selected)) list.unshift(selected);
+  visRows = list;
+  $('visList').innerHTML = list.length
+    ? `<div class="vl h"><span></span><span class="n">name</span><span>el</span><span>az</span><span>f_D kHz</span></div>` +
+      list.map((s, i) => { const L = linkAt(s, t), fd = -UE.fc * L.rdot / C_KMS / 1e3;
+        return `<div class="vl${s === selected ? ' sel' : s === best ? ' best' : ''}" data-i="${i}"><span style="color:${s.col}">●</span>
+          <span class="n">${s.name}</span><span>${L.el.toFixed(1)}°</span><span>${L.az.toFixed(0)}°</span><span>${fd >= 0 ? '+' : ''}${fd.toFixed(2)}</span></div>`; }).join('')
+    : `<div class="empty">${allSats.length ? 'Nothing above the mask right now.' : 'No constellation loaded.'}</div>`;
+}
+
+/* ---- sky plot (N up, E right; compass mode rotates heading-up) ---- */
+function drawSky() {
+  const cv = $('sky'); if (!cv || !cv.offsetWidth || !ueECEF) return;
+  const dpr = window.devicePixelRatio || 1, W = cv.offsetWidth, H = W;
+  if (cv.width !== Math.round(W * dpr) || cv.height !== Math.round(H * dpr)) { cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr); }
+  const x = cv.getContext('2d'); x.setTransform(dpr, 0, 0, dpr, 0, 0); x.clearRect(0, 0, W, H);
+  const cx = W / 2, cy = H / 2, R = H / 2 - 20;
+  const rot = (compassOn && heading != null) ? -heading : 0;
+  const P = (el, az) => { const r = R * (90 - el) / 90, a = (az + rot) * Math.PI / 180; return [cx + r * Math.sin(a), cy - r * Math.cos(a)]; };
+  x.strokeStyle = 'rgba(140,180,255,0.16)'; x.lineWidth = 1; x.font = '10px -apple-system, Segoe UI'; x.fillStyle = '#5d6b80';
+  for (const el of [0, 30, 60]) { x.beginPath(); x.arc(cx, cy, R * (90 - el) / 90, 0, 2 * Math.PI); x.stroke(); if (el) x.fillText(el + '°', cx + 3, cy - R * (90 - el) / 90 + 11); }
+  for (let a = 0; a < 360; a += 30) { const [px, py] = P(0, a); x.beginPath(); x.moveTo(cx, cy); x.lineTo(px, py); x.stroke(); }
+  x.setLineDash([3, 3]); x.strokeStyle = 'rgba(251,191,36,0.55)'; x.beginPath(); x.arc(cx, cy, R * (90 - UE.mask) / 90, 0, 2 * Math.PI); x.stroke(); x.setLineDash([]);
+  x.font = '600 12px -apple-system, Segoe UI'; x.textAlign = 'center'; x.textBaseline = 'middle';
+  for (const [lbl, az] of [['N', 0], ['E', 90], ['S', 180], ['W', 270]]) {
+    const r = R + 11, a = (az + rot) * Math.PI / 180; x.fillStyle = lbl === 'N' ? '#f87171' : '#8c9ab0'; x.fillText(lbl, cx + r * Math.sin(a), cy - r * Math.cos(a));
+  }
+  x.textAlign = 'left'; x.textBaseline = 'alphabetic';
+  if (compassOn && heading != null) {           // pointing marker at the top
+    x.fillStyle = '#5ab0ff'; x.beginPath(); x.moveTo(cx, 3); x.lineTo(cx - 6, 13); x.lineTo(cx + 6, 13); x.closePath(); x.fill();
+  }
+  if (selected && passCache && passCache.curve && passCache.sat === selected) {
+    x.strokeStyle = 'rgba(251,191,36,0.7)'; x.lineWidth = 1.5; x.beginPath(); let st = false;
+    for (const p of passCache.curve) {
+      const L = linkAt(selected, p.t); if (L.el < 0) continue;
+      const [px, py] = P(L.el, L.az); st ? x.lineTo(px, py) : (x.moveTo(px, py), st = true);
+    }
+    x.stroke();
+  }
+  let n = 0;
+  for (const s of allSats) {
+    if (!s.valid || s.el < 0 || !isShown(s)) continue;
+    const [px, py] = P(s.el, s.az);
+    const above = s.el >= UE.mask; if (above) n++;
+    x.globalAlpha = above ? 1 : 0.35; x.fillStyle = s.col;
+    x.beginPath(); x.arc(px, py, s === best ? 5 : 3, 0, 2 * Math.PI); x.fill();
+    if (s === best) { x.strokeStyle = '#4ade80'; x.lineWidth = 2; x.beginPath(); x.arc(px, py, 9, 0, 2 * Math.PI); x.stroke(); }
+    if (s === selected) { x.strokeStyle = '#fff'; x.lineWidth = 1.5; x.beginPath(); x.arc(px, py, 10, 0, 2 * Math.PI); x.stroke(); }
+  }
+  x.globalAlpha = 1;
+  $('skyCnt').textContent = n + ' above ' + UE.mask + '°';
+  $('hdgVal').textContent = compassOn ? (heading != null ? 'hdg ' + heading.toFixed(0) + '°' : 'waiting for compass…') : '';
+}
+
+/* ---- Doppler / elevation chart for next pass ---- */
+function drawDoppler() {
+  const cv = $('dopChart'); if (!cv.offsetWidth) return;
+  const dpr = window.devicePixelRatio || 1, W = cv.offsetWidth, H = 150;
+  if (cv.width !== Math.round(W * dpr)) { cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr); cv.style.height = H + 'px'; }
+  const x = cv.getContext('2d'); x.setTransform(dpr, 0, 0, dpr, 0, 0); x.clearRect(0, 0, W, H);
+  const C = passCache && passCache.curve;
+  if (!C || C.length < 2) { x.fillStyle = '#5d6b80'; x.font = '12px -apple-system, Segoe UI'; x.fillText('No pass in the next 24 h', 10, H / 2); return; }
+  const pl = 52, pr = 28, pt = 12, pb = 20, w = W - pl - pr, h = H - pt - pb;
+  const t0 = C[0].t, t1 = C[C.length - 1].t;
+  let fmax = Math.max(...C.map(p => Math.abs(p.fd))) / 1e3; fmax = niceCeil(fmax);
+  const X = t => pl + w * (t - t0) / (t1 - t0), Yf = f => pt + h / 2 - (f / 1e3) / fmax * h / 2, Ye = e => pt + h - e / 90 * h;
+  x.strokeStyle = 'rgba(140,180,255,0.14)'; x.lineWidth = 1; x.font = '10px -apple-system, Segoe UI'; x.fillStyle = '#5d6b80';
+  for (const f of [-fmax, 0, fmax]) { const y = Yf(f * 1e3); x.beginPath(); x.moveTo(pl, y); x.lineTo(pl + w, y); x.stroke(); x.fillText((f > 0 ? '+' : '') + f + ' kHz', 3, y + 3); }
+  x.textAlign = 'right'; x.fillText('90°', W - 3, pt + 8); x.fillText('0°', W - 3, pt + h); x.textAlign = 'left';
+  const dur = (t1 - t0) / 60000; x.fillText('0', pl, H - 5); x.textAlign = 'right'; x.fillText(dur.toFixed(1) + ' min', pl + w, H - 5); x.textAlign = 'left';
+  x.setLineDash([4, 3]); x.strokeStyle = 'rgba(251,191,36,0.75)'; x.lineWidth = 1.3; x.beginPath();
+  C.forEach((p, i) => i ? x.lineTo(X(p.t), Ye(p.el)) : x.moveTo(X(p.t), Ye(p.el))); x.stroke(); x.setLineDash([]);
+  x.strokeStyle = '#5ab0ff'; x.lineWidth = 2; x.beginPath();
+  C.forEach((p, i) => i ? x.lineTo(X(p.t), Yf(p.fd)) : x.moveTo(X(p.t), Yf(p.fd))); x.stroke();
+  const tn = simMs();
+  if (tn >= t0 && tn <= t1) {
+    const px = X(tn); x.strokeStyle = 'rgba(255,255,255,0.6)'; x.lineWidth = 1; x.beginPath(); x.moveTo(px, pt); x.lineTo(px, pt + h); x.stroke();
+    const L = linkAt(selected, tn), fd = -UE.fc * L.rdot / C_KMS;
+    x.fillStyle = '#fff'; x.beginPath(); x.arc(px, Yf(fd), 3.5, 0, 2 * Math.PI); x.fill();
+  }
+  x.fillStyle = '#5ab0ff'; x.fillText('f_D', pl + 4, pt + 10); x.fillStyle = 'rgba(251,191,36,0.9)'; x.fillText('elev', pl + 28, pt + 10);
+}
+function niceCeil(v) { if (v <= 0) return 1; const p = Math.pow(10, Math.floor(Math.log10(v))), m = v / p; return (m <= 1 ? 1 : m <= 2 ? 2 : m <= 5 ? 5 : 10) * p; }
+
+/* ---- constellation picker ---- */
+function renderCatalog() {
+  $('conWrap').innerHTML = CATALOG.map(sec => `<div class="cgh">${sec.h}</div><div class="conGrid">` +
+    sec.items.map(([k, lbl]) => `<button class="cg${groups[k] ? ' on' : ''}${loading.has(k) ? ' busy' : ''}" data-k="${k}" data-l="${lbl}" style="color:${COLORS[k]}">
+      <span class="d" style="background:${COLORS[k]}"></span><span>${loading.has(k) ? 'Loading…' : lbl}</span></button>`).join('') + '</div>').join('');
+  document.querySelectorAll('#conWrap .cg').forEach(b => b.onclick = () => {
+    const k = b.dataset.k;
+    if (groups[k]) removeGroup(k); else addGroup(k, b.dataset.l, groupUrl(k));
+  });
+}
+
+/* ---- legend ---- */
+function renderLegend() {
+  const keys = Object.keys(groups), el = $('legend');
+  if (!keys.length) { el.innerHTML = '<div class="empty">Nothing loaded yet — tap a constellation above.</div>'; $('legendSum').textContent = ''; return; }
+  const t = simMs();
+  el.innerHTML = keys.map(k => {
+    const g = groups[k], ages = g.sats.map(s => ageDays(s, t)).sort((a, b) => a - b), med = ages[ages.length >> 1];
+    const cls = Math.abs(med) < 3 ? 'ok' : Math.abs(med) < 14 ? 'old' : 'bad';
+    return `<div class="lg${g.show ? '' : ' hidden'}" data-k="${k}">
+      <span class="sw" style="background:${g.color};color:${g.color}"></span>
+      <span class="nm">${g.label}</span>
+      <span class="age ${cls}" title="Median TLE age vs sim time">${med.toFixed(0)}d</span>
+      <span class="ct"><b>${g.visible}</b>/${shownCount(g) === g.sats.length || !g.show ? g.sats.length : shownCount(g) + '·' + g.sats.length}</span>
+      <button class="ib${g.showRings ? '' : ' off'}" data-a="rings" aria-label="Orbit rings">◯</button>
+      <button class="ib${g.show ? '' : ' off'}" data-a="eye" aria-label="Show / hide">◉</button>
+      <button class="ib" data-a="x" aria-label="Remove">✕</button></div>` +
+      (g.shells.length > 1 && g.show ? `<div class="shells" data-k="${k}">` +
+        `<button class="sh all" data-i="all">all</button>` +
+        (g.ringsSuppressed ? `<span class="hint" style="margin:0 0 2px 2px;width:100%">Orbit planes hidden (too many) — hold a shell chip to show only that shell.</span>` : '') +
+        g.shells.map((sh, i) => `<button class="sh${sh.show ? ' on' : ''}" data-i="${i}" style="${sh.show ? 'color:' + g.color : ''}">${sh.label} (${sh.sats.length})</button>`).join('') + `</div>` : '');
+  }).join('');
+  $('legendSum').textContent = allSats.length.toLocaleString() + ' sats';
+  el.querySelectorAll('.lg').forEach(row => row.querySelectorAll('.ib').forEach(b => b.onclick = e => {
+    e.stopPropagation(); const g = groups[row.dataset.k];
+    if (b.dataset.a === 'x') return removeGroup(g.key);
+    if (b.dataset.a === 'eye') { g.show = !g.show; if (!g.show && selected && selected.group === g) select(null); }
+    if (b.dataset.a === 'rings') { g.showRings = !g.showRings; g.ringsDirty = true; }
+    applyGroupVis(g); renderLegend(); renderTypeFilter();
+  }));
+  el.querySelectorAll('.shells').forEach(row => row.querySelectorAll('.sh').forEach(b => bindChip(b, only => {
+    const g = groups[row.dataset.k], i = b.dataset.i;
+    if (i === 'all') setShell(g, 'all'); else setShell(g, g.shells[+i], only);
+  })));
+}
+
+/* ---- toast ---- */
+let toastTimer;
+function toast(msg, kind, ms, action) {
+  const t = $('toast'); clearTimeout(toastTimer);
+  $('toastMsg').textContent = msg; $('toastSpin').style.display = kind === 'busy' ? '' : 'none';
+  t.className = 'show' + (kind === 'err' ? ' err' : '');
+  $('toastAct').innerHTML = '';
+  if (action) { const b = document.createElement('button'); b.className = 'btn sm'; b.textContent = action.text;
+    b.onclick = () => { action.fn(); t.className = ''; }; $('toastAct').appendChild(b); }
+  if (kind !== 'busy') toastTimer = setTimeout(() => t.className = '', ms || 3000);
+}
+function hideToast() { clearTimeout(toastTimer); $('toast').className = ''; }
+
+/* =====================================================================
+ *  Bottom sheet (peek / half / full) + tabs
+ * ===================================================================*/
+const sheet = $('sheet');
+let sheetState = 'peek';
+const docked = () => matchMedia('(min-width:600px) and (min-aspect-ratio:1/1)').matches;
+function sheetMetrics() {
+  const H = sheet.offsetHeight;
+  const sab = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--sab-px')) || 0;
+  const peek = $('grab').offsetHeight + $('tabs').offsetHeight + sab;
+  return { H, peek, half: Math.min(H, Math.max(peek + 200, innerHeight * 0.52)), full: H };
+}
+function setSheet(state, animate = true) {
+  sheetState = state;
+  if (docked()) { sheet.style.setProperty('--ty', '0px'); document.documentElement.style.setProperty('--peekH', '0px'); return; }
+  const m = sheetMetrics(), vis = m[state];
+  sheet.classList.toggle('drag', !animate);
+  sheet.style.setProperty('--ty', (m.H - vis) + 'px');
+  document.documentElement.style.setProperty('--peekH', (state === 'peek' ? vis : m.peek) + 'px');
+  $('fabs').style.opacity = state === 'peek' ? 1 : 0; $('fabs').style.pointerEvents = state === 'peek' ? '' : 'none';
+}
+(function setupSheetDrag() {
+  const grab = $('grab'); let y0 = null, ty0 = 0, moved = false, lastY = 0, lastT = 0, vel = 0;
+  grab.addEventListener('pointerdown', e => {
+    if (docked()) return;
+    y0 = e.clientY; moved = false; lastY = e.clientY; lastT = performance.now(); vel = 0;
+    const m = sheetMetrics(); ty0 = m.H - m[sheetState];
+    grab.setPointerCapture(e.pointerId);
+  });
+  grab.addEventListener('pointermove', e => {
+    if (y0 === null) return;
+    const dy = e.clientY - y0;
+    if (!moved && Math.abs(dy) < 6) return;
+    moved = true; sheet.classList.add('drag');
+    const m = sheetMetrics(), ty = Math.max(0, Math.min(m.H - m.peek, ty0 + dy));
+    sheet.style.setProperty('--ty', ty + 'px');
+    const now = performance.now(); vel = (e.clientY - lastY) / Math.max(1, now - lastT); lastY = e.clientY; lastT = now;
+  });
+  const end = e => {
+    if (y0 === null) return; y0 = null; sheet.classList.remove('drag');
+    if (!moved) { setSheet(sheetState === 'peek' ? 'half' : 'peek'); return; }       // tap on handle/peek toggles
+    const m = sheetMetrics(), cur = m.H - parseFloat(sheet.style.getPropertyValue('--ty'));
+    let target;
+    if (vel < -0.5) target = cur > m.half + 20 ? 'full' : 'half';
+    else if (vel > 0.5) target = cur < m.half - 20 ? 'peek' : 'half';
+    else target = ['peek', 'half', 'full'].reduce((a, b) => Math.abs(m[b] - cur) < Math.abs(m[a] - cur) ? b : a);
+    setSheet(target);
+  };
+  grab.addEventListener('pointerup', end); grab.addEventListener('pointercancel', end);
+})();
+function showTab(name, expand = true) {
+  activeTab = name; prefs.tab = name; savePrefs();
+  document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === name));
+  document.querySelectorAll('.panels section').forEach(s => s.hidden = s.dataset.panel !== name);
+  if (expand && sheetState === 'peek') setSheet('half');
+  $('panels').scrollTop = 0;
+  uiTick(); drawSky();
+}
+
+/* =====================================================================
+ *  Controls
+ * ===================================================================*/
+function jumpTo(ms) { viewer.clock.currentTime = Cesium.JulianDate.fromDate(new Date(ms)); lastSimMs = null; }
+function setSpeed(s) {
+  viewer.clock.multiplier = s;
+  $('btnSpeed').textContent = s + '×';
+  document.querySelectorAll('#speeds .btn').forEach(b => b.classList.toggle('on', +b.dataset.s === s));
+}
+function togglePlay() {
+  const c = viewer.clock; c.shouldAnimate = !c.shouldAnimate;
+  $('btnPlay').textContent = c.shouldAnimate ? '❚❚' : '▶';
+}
+function setFollow(on) {
+  following = on && !!selected;
+  viewer.trackedEntity = following ? selEntity : undefined;
+  $('btnFollow').classList.toggle('on', following);
+  $('btnFollow').textContent = following ? 'Following' : 'Follow camera';
+}
+function flyToUE() {
+  viewer.trackedEntity = undefined; following = false;
+  scene.camera.flyTo({ destination: Cesium.Cartesian3.fromDegrees(UE.lon, UE.lat, 1.6e7), duration: 1.4 });
+}
+function useMyLocation() {
+  if (!navigator.geolocation) return toast('Location not available in this browser', 'err', 3000);
+  if (!isSecureContext) return toast('Location needs HTTPS — open the hosted app', 'err', 4000);
+  toast('Getting your location…', 'busy');
+  navigator.geolocation.getCurrentPosition(p => {
+    setUE(p.coords.latitude, p.coords.longitude); flyToUE();
+    toast(`UE moved to your location (±${p.coords.accuracy.toFixed(0)} m)`, null, 2500);
+  }, err => toast('Location unavailable: ' + err.message, 'err', 4000), { enableHighAccuracy: false, timeout: 15000, maximumAge: 600000 });
+}
+/* compass: iOS gives webkitCompassHeading (0 = magnetic north, clockwise); others use absolute alpha */
+function onOrient(e) {
+  let h = null;
+  if (typeof e.webkitCompassHeading === 'number' && !isNaN(e.webkitCompassHeading)) h = e.webkitCompassHeading;
+  else if (e.absolute && e.alpha != null) h = 360 - e.alpha;
+  if (h == null) return;
+  const so = (screen.orientation && screen.orientation.angle) || window.orientation || 0;
+  heading = (h + so + 360) % 360;
+}
+async function toggleCompass() {
+  if (!compassOn) {
+    try {
+      if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
+        const r = await DeviceOrientationEvent.requestPermission();
+        if (r !== 'granted') return toast('Motion & orientation access was denied', 'err', 3500);
+      }
+    } catch (e) { return toast('Compass needs HTTPS and a tap to enable', 'err', 3500); }
+    window.addEventListener('deviceorientationabsolute', onOrient, true);
+    window.addEventListener('deviceorientation', onOrient, true);
+    compassOn = true;
+    setTimeout(() => { if (compassOn && heading == null) toast('No compass on this device', 'err', 3000); }, 2500);
+  } else {
+    window.removeEventListener('deviceorientationabsolute', onOrient, true);
+    window.removeEventListener('deviceorientation', onOrient, true);
+    compassOn = false; heading = null;
+  }
+  $('btnCompass').textContent = 'Compass: ' + (compassOn ? 'on' : 'off');
+  $('btnCompass').classList.toggle('on', compassOn);
+}
+let wakeLock = null;
+async function setWake(on) {
+  try {
+    if (on) { wakeLock = await navigator.wakeLock.request('screen'); }
+    else if (wakeLock) { await wakeLock.release(); wakeLock = null; }
+  } catch (e) { $('tWake').checked = false; toast('Keep-awake is not supported here (needs iOS 16.4+)', 'err', 3500); }
+}
+
+/* finger-friendly picking: exact pick first, then nearest visible satellite within TAP_RADIUS_PX */
+const _w = new Cesium.Cartesian2();
+function pickSat(pos) {
+  const p = scene.pick(pos);
+  if (p && p.id && p.id.satrec) return p.id;
+  const toWin = (Cesium.SceneTransforms.worldToWindowCoordinates || Cesium.SceneTransforms.wgs84ToWindowCoordinates).bind(Cesium.SceneTransforms);
+  const occ = scene.mode === Cesium.SceneMode.SCENE3D ? new Cesium.EllipsoidalOccluder(Cesium.Ellipsoid.WGS84, scene.camera.positionWC) : null;
+  let bestS = null, bd = TAP_RADIUS_PX * TAP_RADIUS_PX;
+  for (const s of allSats) {
+    if (!s.valid || !isShown(s)) continue;
+    if (occ && !occ.isPointVisible(s.ecef)) continue;
+    const q = toWin(scene, s.ecef, _w); if (!q) continue;
+    const d = (q.x - pos.x) ** 2 + (q.y - pos.y) ** 2;
+    if (d < bd) { bd = d; bestS = s; }
+  }
+  return bestS;
+}
+function placeUEAt(pos) {
+  const c = scene.camera.pickEllipsoid(pos);
+  if (!c) return false;
+  const g = Cesium.Cartographic.fromCartesian(c);
+  setUE(Cesium.Math.toDegrees(g.latitude), Cesium.Math.toDegrees(g.longitude));
+  toast(`UE moved to ${UE.lat.toFixed(3)}°, ${UE.lon.toFixed(3)}°`, null, 2000);
+  return true;
+}
+
+function setupInput() {
+  const canvas = scene.canvas;
+  let suppressClickUntil = 0;
+  const h = new Cesium.ScreenSpaceEventHandler(canvas);
+  h.setInputAction(e => {
+    if (performance.now() < suppressClickUntil) return;
+    $('timePop').hidden = true;
+    if (pickMode) {
+      placeUEAt(e.position);
+      pickMode = false; document.body.classList.remove('picking'); $('btnPick').classList.remove('on'); return;
+    }
+    const s = allSats.length ? pickSat(e.position) : null;
+    if (s) select(s);
+    else { const p = scene.pick(e.position); if (!(p && p.id === selEntity)) select(null); }
+  }, Cesium.ScreenSpaceEventType.LEFT_CLICK);
+  let lastPick = 0;
+  h.setInputAction(e => {
+    if (lastPointerType !== 'mouse') return;
+    const now = performance.now(); if (now - lastPick < 60) return; lastPick = now;
+    const p = allSats.length ? scene.pick(e.endPosition) : null, tip = $('tip');
+    if (p && p.id && p.id.satrec) {
+      const s = p.id; tip.style.display = 'block';
+      tip.innerHTML = `<span style="color:${s.col}">●</span> ${s.name} <i>#${s.norad} · ${s.otype.reg} · el ${s.el.toFixed(1)}°</i>`;
+      tip.style.left = (e.endPosition.x + 14) + 'px'; tip.style.top = (e.endPosition.y + 10) + 'px';
+      canvas.style.cursor = 'pointer';
+    } else { tip.style.display = 'none'; canvas.style.cursor = ''; }
+  }, Cesium.ScreenSpaceEventType.MOUSE_MOVE);
+
+  // long-press on the globe → move UE there
+  let lp = null; const ring = $('lpRing');
+  const lpCancel = () => { if (lp) { clearTimeout(lp.t); lp = null; ring.classList.remove('go'); } };
+  window.addEventListener('pointerdown', e => { lastPointerType = e.pointerType; }, true);
+  canvas.addEventListener('pointerdown', e => {
+    if (lp) { lpCancel(); return; }                 // second finger = pinch
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    const r = canvas.getBoundingClientRect(), pos = new Cesium.Cartesian2(e.clientX - r.left, e.clientY - r.top);
+    ring.style.left = e.clientX + 'px'; ring.style.top = e.clientY + 'px'; ring.classList.remove('go'); void ring.offsetWidth;
+    lp = { x: e.clientX, y: e.clientY, id: e.pointerId,
+      t: setTimeout(() => { ring.classList.remove('go'); if (placeUEAt(pos)) suppressClickUntil = performance.now() + 600; lp = null; }, LONG_PRESS_MS) };
+    if (e.pointerType !== 'mouse') ring.classList.add('go');
+  });
+  canvas.addEventListener('pointermove', e => { if (lp && e.pointerId === lp.id && Math.hypot(e.clientX - lp.x, e.clientY - lp.y) > 10) lpCancel(); });
+  canvas.addEventListener('pointerup', lpCancel); canvas.addEventListener('pointercancel', lpCancel);
+  canvas.addEventListener('contextmenu', e => e.preventDefault());
+
+  // HUD + time popover
+  $('btnPlay').onclick = togglePlay;
+  $('btnSpeed').onclick = () => setSpeed(SPEEDS[(SPEEDS.indexOf(viewer.clock.multiplier) + 1) % SPEEDS.length]);
+  $('btnNow').onclick = () => { jumpTo(Date.now()); setSpeed(1); if (!viewer.clock.shouldAnimate) togglePlay(); };
+  let scrubAnchor = Date.now();
+  const syncPop = () => {
+    scrubAnchor = Date.now(); const off = Math.round((simMs() - scrubAnchor) / 60000);
+    $('scrub').value = Math.max(-720, Math.min(1440, off));
+    $('dtIn').value = new Date(simMs()).toISOString().slice(0, 19);
+    $('scrubVal').textContent = off === 0 ? 'now' : (off > 0 ? '+' : '−') + fmtOff(Math.abs(off));
+  };
+  const fmtOff = m => m >= 60 ? (m / 60).toFixed(1) + ' h' : m + ' min';
+  $('clock').onclick = () => { const p = $('timePop'); p.hidden = !p.hidden; if (!p.hidden) syncPop(); };
+  $('scrub').oninput = e => { const v = +e.target.value; jumpTo(scrubAnchor + v * 60000);
+    $('scrubVal').textContent = v === 0 ? 'now' : (v > 0 ? '+' : '−') + fmtOff(Math.abs(v)); $('dtIn').value = new Date(simMs()).toISOString().slice(0, 19); };
+  $('dtIn').onchange = e => { const t = Date.parse(e.target.value + 'Z'); if (isFinite(t)) { jumpTo(t); syncPop(); } };
+  document.querySelectorAll('#speeds .btn').forEach(b => b.onclick = () => setSpeed(+b.dataset.s));
+
+  // FABs
+  $('fabLoc').onclick = useMyLocation;
+  $('fabHome').onclick = flyToUE;
+  $('fab2d').onclick = () => { scene.mode === Cesium.SceneMode.SCENE2D ? scene.morphTo3D(0.8) : scene.morphTo2D(0.8); };
+
+  // tabs + sheet
+  document.querySelectorAll('#tabs button').forEach(b => b.onclick = () => showTab(b.dataset.tab));
+  addEventListener('resize', () => setSheet(sheetState, false));
+
+  // Layers
+  const doSearch = async () => {
+    const q = $('searchInput').value.trim(); if (!q) return;
+    $('searchInput').blur();
+    const isId = /^\d{1,9}$/.test(q);
+    const url = `${CELESTRAK}?${isId ? 'CATNR' : 'NAME'}=${encodeURIComponent(q)}&FORMAT=tle`;
+    const g = await addGroup('q:' + q.toUpperCase(), (isId ? '#' : '') + q.toUpperCase(), url);
+    if (g && g.sats.length <= 5) { select(g.sats[0]); showTab('link'); }
+  };
+  $('btnSearch').onclick = doSearch;
+  $('searchInput').onkeydown = e => { if (e.key === 'Enter') doSearch(); };
+  $('btnFile').onclick = () => $('fileInput').click();
+  $('fileInput').onchange = async e => {
+    const f = e.target.files[0]; if (!f) return;
+    const text = await f.text(); e.target.value = '';
+    const url = location.origin + '/__local_tle/' + encodeURIComponent(f.name);
+    await cachePut(url, text);
+    addGroup('file:' + f.name, f.name.replace(/\.(txt|tle|3le)$/i, ''), url, null, text);
+  };
+  $('btnClear').onclick = () => Object.keys(groups).forEach(removeGroup);
+  $('colorBy').onchange = e => { prefs.colorBy = e.target.value; savePrefs(); applyColors(); };
+  $('typeReset').onclick = e => { e.preventDefault(); REGIMES.forEach(x => TYPE_ON.reg.add(x.k)); INCS.forEach(x => TYPE_ON.inc.add(x.k));
+    updateVisFlags(); renderTypeFilter(); renderLegend(); };
+
+  // Setup
+  $('btnGeo').onclick = useMyLocation;
+  $('btnPick').onclick = () => {
+    pickMode = !pickMode; document.body.classList.toggle('picking', pickMode); $('btnPick').classList.toggle('on', pickMode);
+    if (pickMode) { setSheet('peek'); toast('Tap the globe to place the UE', null, 2500); }
+  };
+  const ueChange = () => {
+    const la = +$('ueLat').value, lo = +$('ueLon').value;
+    UE.mask = Math.min(89, Math.max(0, +$('ueMask').value || 0));
+    UE.fc = Math.max(0.01, +$('fcGHz').value || 2) * 1e9;
+    prefs.mask = UE.mask; prefs.fc = UE.fc / 1e9; savePrefs();
+    if (isFinite(la) && isFinite(lo) && Math.abs(la) <= 90) setUE(la, ((lo + 540) % 360) - 180);
+    for (const k in groups) groups[k].ringsDirty = true;
+  };
+  ['ueLat', 'ueLon', 'ueMask', 'fcGHz'].forEach(i => $(i).onchange = ueChange);
+  document.querySelectorAll('#fcChips .btn').forEach(b => b.onclick = () => { $('fcGHz').value = b.dataset.f; ueChange(); });
+  $('baseMap').onchange = e => setBaseMap(e.target.value);
+  $('tLight').onchange = e => { scene.globe.enableLighting = e.target.checked; prefs.light = e.target.checked; savePrefs(); };
+  $('ringStyle').onchange = e => { prefs.ring = e.target.value; savePrefs(); for (const k in groups) { groups[k].ringsDirty = true; applyGroupVis(groups[k]); } };
+  $('orbitMode').onchange = e => { prefs.orbit = e.target.value; savePrefs(); for (const k in groups) { groups[k].ringsDirty = true; applyGroupVis(groups[k]); } renderLegend(); };
+  $('tLinks').onchange = e => { prefs.links = e.target.checked; savePrefs(); };
+  $('tTrack').onchange = e => { prefs.track = e.target.checked; savePrefs(); select(selected); };
+  $('tWake').onchange = e => setWake(e.target.checked);
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && $('tWake').checked) setWake(true); });
+  document.querySelectorAll('#qualSeg button').forEach(b => b.onclick = () => applyQuality(b.dataset.q));
+  $('btnRefreshTle').onclick = async () => {
+    const list = Object.values(groups).filter(g => g.url && !g.url.includes('/__local_tle/'));
+    for (const g of list) { removeGroup(g.key); await fetchText(g.url, true).catch(() => {}); await addGroup(g.key, g.label, g.url, g.color, null, true); }
+    toast('TLEs refreshed', null, 2000);
+  };
+  $('btnReset').onclick = async () => {
+    try { localStorage.removeItem(PREF_KEY); await caches.delete(TLE_CACHE); } catch (e) {}
+    location.reload();
+  };
+
+  // Link
+  $('btnFollow').onclick = () => setFollow(!following);
+  $('btnDesel').onclick = () => select(null);
+  $('visList').onclick = e => { const r = e.target.closest('.vl[data-i]'); if (r) { select(visRows[+r.dataset.i]); } };
+  $('btnCompass').onclick = toggleCompass;
+
+  window.addEventListener('keydown', e => {
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
+    if (e.code === 'Space') { e.preventDefault(); togglePlay(); }
+    else if (e.key === 'Escape') select(null);
+    else if (e.key === 'f' || e.key === 'F') setFollow(!following);
+  });
+}
+
+/* ---- install hint / service worker ---- */
+function renderInstall() {
+  const box = $('installBox');
+  if (IS_STANDALONE) box.innerHTML = '<b>Installed ✓</b> Running as a home-screen app. TLEs and the app shell are cached for offline use.';
+  else if (IS_IOS) box.innerHTML = 'Install on iPhone: in <b>Safari</b>, tap <b>Share</b> <span style="font-size:15px">⬆︎</span> → <b>Add to Home Screen</b>. It then opens full-screen like a native app.';
+  else box.innerHTML = 'Install: use your browser’s <b>Install app</b> / <b>Add to Home screen</b> menu item.';
+}
+function registerSW() {
+  if (!('serviceWorker' in navigator) || !location.protocol.startsWith('http')) return;
+  const hadController = !!navigator.serviceWorker.controller;
+  navigator.serviceWorker.register('sw.js').then(reg => {
+    reg.addEventListener('updatefound', () => {
+      const w = reg.installing; if (!w) return;
+      w.addEventListener('statechange', () => {
+        if (w.state === 'activated' && hadController) toast('App updated', null, 6000, { text: 'Reload', fn: () => location.reload() });
+      });
+    });
+  }).catch(e => console.warn('SW registration failed', e));
+}
+
+/* =====================================================================
+ *  helpers + boot
+ * ===================================================================*/
+function cross(a, b) { return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]; }
+
+(function probeSafeArea() {   // expose safe-area-bottom in px for sheet maths
+  const d = document.createElement('div'); d.style.cssText = 'position:fixed;bottom:0;height:env(safe-area-inset-bottom,0px);width:0;visibility:hidden';
+  document.body.appendChild(d);
+  const upd = () => document.documentElement.style.setProperty('--sab-px', d.offsetHeight + 'px');
+  upd(); addEventListener('resize', upd);
+})();
+
+async function boot() {
+  // restore controls
+  $('ueMask').value = UE.mask; $('fcGHz').value = +(UE.fc / 1e9).toFixed(3);
+  $('baseMap').value = prefs.base; $('tLight').checked = prefs.light; $('orbitMode').value = prefs.orbit;
+  $('ringStyle').value = prefs.ring; $('tLinks').checked = prefs.links; $('tTrack').checked = prefs.track; $('colorBy').value = prefs.colorBy;
+
+  GLOW = glowSprite().toDataURL();
+  initViewer();
+  setUE(UE.lat, UE.lon);
+  renderCatalog(); renderLegend(); renderInstall();
+  setSpeed(1);
+  showTab(prefs.tab || 'link', false);
+  setSheet('peek', false);
+  requestAnimationFrame(() => setSheet('peek', false));
+  registerSW();
+
+  // restore constellations (deep link ?group=a,b overrides)
+  const q = new URLSearchParams(location.search).getAll('group').join(',').split(',').filter(Boolean);
+  const list = q.length ? q.map(k => ({ key: k, label: (CATALOG.flatMap(c => c.items).find(i => i[0] === k) || [k, k])[1], url: groupUrl(k) }))
+    : (prefs.groups || [{ key: 'starlink', label: 'Starlink', url: groupUrl('starlink') }]);
+  for (const g of list) await addGroup(g.key, g.label, g.url, null, null, true);
+  if (IS_IOS && !IS_STANDALONE && !prefs.seenInstall) {
+    prefs.seenInstall = true; savePrefs();
+    setTimeout(() => toast('Tip: Share ⬆︎ → Add to Home Screen to install', null, 7000), 1500);
+  }
+}
+boot();
+</script>
+</body>
+</html>
