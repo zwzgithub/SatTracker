@@ -5,7 +5,7 @@
  * - tle/ mirror: network-first
  * - CelesTrak: not intercepted (the page caches TLEs itself in Cache Storage)
  * Bump VERSION when you change index.html so installed apps pick up the new build. */
-const VERSION = 'uct-v1';
+const VERSION = 'uct-v3';
 const SHELL = VERSION + '-shell', CDN = VERSION + '-cdn', MIRROR = VERSION + '-mirror', TILES = 'uct-tiles';
 const TILE_MAX = 1500;
 const SHELL_FILES = ['./', 'index.html', 'manifest.webmanifest', 'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png'];

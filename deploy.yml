@@ -1,0 +1,42 @@
+# Builds and deploys the app to GitHub Pages, bundling fresh TLEs from CelesTrak.
+# Runs on every push to main and every 4 h. Repo Settings → Pages → Source must be "GitHub Actions".
+# CelesTrak etiquette: 1 download per group per 2 h per IP, ~100 MB/day. OMM-CSV for 18 groups ≈ 6 MB/run.
+name: Deploy app + TLEs
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '17 */4 * * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+concurrency:
+  group: pages
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: pages
+        uses: actions/configure-pages@v5
+      - name: Assemble site
+        run: |
+          mkdir -p _site
+          rsync -a --exclude '.git' --exclude '.github' --exclude 'tools' --exclude '_site' --exclude 'tle' ./ _site/
+      - name: Fetch TLEs (falls back to the currently published copy on 403)
+        run: python3 tools/fetch_tle.py _site/tle "${{ steps.pages.outputs.base_url }}"
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

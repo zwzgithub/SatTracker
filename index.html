@@ -6,7 +6,7 @@
 <meta name="theme-color" content="#05080f">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
 <meta name="apple-mobile-web-app-title" content="SatTrack">
 <meta name="format-detection" content="telephone=no">
 <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
@@ -46,7 +46,7 @@
   --sal:env(safe-area-inset-left,0px); --sar:env(safe-area-inset-right,0px);
 }
 *{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
-html,body{position:fixed;inset:0;overflow:hidden;overscroll-behavior:none;background:#000;color:var(--tx);
+html,body{position:fixed;top:0;left:0;right:0;height:var(--app-h,100dvh);overflow:hidden;overscroll-behavior:none;background:#000;color:var(--tx);
   font:14px/1.4 -apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",system-ui,sans-serif;
   -webkit-user-select:none;user-select:none;-webkit-touch-callout:none;-webkit-text-size-adjust:100%}
 button{font:inherit;color:inherit}
@@ -658,17 +658,32 @@ async function fetchText(url, force) {
   if (url.startsWith(location.origin + '/__local_tle/')) { if (cached) return cached.text; throw new Error('local file no longer cached'); }
   if (cached && !force && Date.now() - cached.t < TLE_TTL_MS) return cached.text;
   const valid = t => /^\s*1 /m.test(t);
-  const tryGet = async u => { const r = await fetch(u, { cache: 'no-store' }); if (!r.ok) throw new Error('HTTP ' + r.status); const t = await r.text(); if (!valid(t)) throw new Error('no TLEs'); return t; };
+  const tryGet = async (u, mode) => {
+    const r = await fetch(u, { cache: mode || 'no-store' });
+    if (!r.ok) {
+      const body = r.status === 403 ? (await r.text().catch(() => '')) : '';
+      const m = /last successful download[^]*?at ([0-9-]+ [0-9:]+) UTC/i.exec(body);
+      if (m) {                                  // CelesTrak: 1 download per group per 2 h per IP
+        const next = new Date(Date.parse(m[1].replace(' ', 'T') + 'Z') + 2 * 3600e3);
+        throw new Error(`CelesTrak allows one download per group per 2 h from your network — already fetched at ${m[1].slice(11, 16)} UTC, retry after ${next.toISOString().slice(11, 16)} UTC`);
+      }
+      throw new Error('HTTP ' + r.status + (body ? ': ' + body.slice(0, 80) : ''));
+    }
+    const t = await r.text(); if (!valid(t)) throw new Error(t.trim().slice(0, 100) || 'no TLEs'); return t;
+  };
+  // 1) same-origin mirror (built by GitHub Actions every 4 h; no per-device CelesTrak limit, includes NORAD IDs > 99999)
+  const mu = mirrorUrl(url), hosted = location.protocol.startsWith('http');
+  if (mu && hosted) { try { const t = await tryGet(mu, 'no-cache'); await cachePut(url, t); return t; } catch (e0) {} }
+  // 2) CelesTrak direct, 3) stale device cache
   try { const t = await tryGet(url); await cachePut(url, t); return t; }
   catch (e1) {
-    const mu = mirrorUrl(url);
-    if (mu && location.protocol.startsWith('http')) {
-      try { const t = await tryGet(mu); await cachePut(url, t); toast('CelesTrak unreachable — using the app’s TLE mirror', null, 3500); return t; } catch (e2) {}
-    }
-    if (cached) { toast('Offline — using TLEs cached ' + new Date(cached.t).toLocaleString(), 'err', 5000); return cached.text; }
+    if (cached) { toast('Using TLEs cached ' + new Date(cached.t).toLocaleString() + ' (' + e1.message.slice(0, 60) + ')', 'err', 6000); return cached.text; }
     throw e1;
   }
 }
+// Alpha-5 catalog numbers (A0000 = 100000 … Z9999 = 339999; I and O skipped)
+function alpha5(f) { f = f.trim(); const c = f[0]; if (/\d/.test(c)) return +f;
+  const v = 'ABCDEFGHJKLMNPQRSTUVWXYZ'.indexOf(c.toUpperCase()); return v < 0 ? NaN : (v + 10) * 10000 + +f.slice(1); }
 function parseTLE(text) {
   const L = text.split(/\r?\n/).map(s => s.trimEnd()).filter(s => s.trim());
   const out = [];
@@ -679,7 +694,7 @@ function parseTLE(text) {
       const name = (prev && !prev.startsWith('1 ') && !prev.startsWith('2 ')) ? prev.replace(/^0\s+/, '') : 'NORAD ' + l1.slice(2, 7).trim();
       try {
         const rec = satellite.twoline2satrec(l1, l2);
-        if (!rec.error) out.push({ name, l1, l2, satrec: rec, norad: +l1.slice(2, 7) });
+        if (!rec.error) out.push({ name, l1, l2, satrec: rec, norad: alpha5(l1.slice(2, 7)) });
       } catch (e) {}
       i++;
     }
@@ -699,7 +714,7 @@ async function addGroup(key, label, url, colorHex, textOverride, quiet) {
   toast('Loading ' + label + '…', 'busy');
   let sats;
   try { sats = parseTLE(textOverride != null ? textOverride : await fetchText(url)); }
-  catch (e) { loading.delete(key); renderCatalog(); toast('Could not load ' + label + ' (' + e.message + ')', 'err', 6000); return; }
+  catch (e) { loading.delete(key); renderCatalog(); toast('Could not load ' + label + ': ' + e.message, 'err', 12000); return; }
   loading.delete(key);
   if (!sats.length) { renderCatalog(); toast('No satellites found for ' + label, 'err', 4000); return; }
 
@@ -1377,12 +1392,12 @@ function sheetMetrics() {
   const H = sheet.offsetHeight;
   const sab = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--sab-px')) || 0;
   const peek = $('grab').offsetHeight + $('tabs').offsetHeight + sab;
-  return { H, peek, half: Math.min(H, Math.max(peek + 200, innerHeight * 0.52)), full: H };
+  return { H, peek, half: Math.min(H, Math.max(peek + 200, document.body.offsetHeight * 0.52)), full: H };
 }
 function setSheet(state, animate = true) {
   sheetState = state;
   if (docked()) { sheet.style.setProperty('--ty', '0px'); document.documentElement.style.setProperty('--peekH', '0px'); return; }
-  const m = sheetMetrics(), vis = m[state];
+  const m = sheetMetrics(), vis = Math.min(m[state], m.H);
   sheet.classList.toggle('drag', !animate);
   sheet.style.setProperty('--ty', (m.H - vis) + 'px');
   document.documentElement.style.setProperty('--peekH', (state === 'peek' ? vis : m.peek) + 'px');
@@ -1591,7 +1606,7 @@ function setupInput() {
 
   // tabs + sheet
   document.querySelectorAll('#tabs button').forEach(b => b.onclick = () => showTab(b.dataset.tab));
-  addEventListener('resize', () => setSheet(sheetState, false));
+  // resize hooks live in syncViewport()
 
   // Layers
   const doSearch = async () => {
@@ -1644,7 +1659,7 @@ function setupInput() {
   document.querySelectorAll('#qualSeg button').forEach(b => b.onclick = () => applyQuality(b.dataset.q));
   $('btnRefreshTle').onclick = async () => {
     const list = Object.values(groups).filter(g => g.url && !g.url.includes('/__local_tle/'));
-    for (const g of list) { removeGroup(g.key); await fetchText(g.url, true).catch(() => {}); await addGroup(g.key, g.label, g.url, g.color, null, true); }
+    for (const g of list) { removeGroup(g.key); await addGroup(g.key, g.label, g.url, g.color, null, true); }
     toast('TLEs refreshed', null, 2000);
   };
   $('btnReset').onclick = async () => {
@@ -1691,6 +1706,54 @@ function registerSW() {
  * ===================================================================*/
 function cross(a, b) { return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]; }
 
+/* ---- iOS standalone viewport guard ----
+ * iOS 26 home-screen web apps can report a layout viewport that differs from the real screen
+ * (status-bar inset, and visualViewport staying short after the keyboard closes). Size the app
+ * from what is actually visible and re-snap the sheet whenever it changes. */
+function measureH() {
+  const vv = window.visualViewport, typing = /INPUT|SELECT|TEXTAREA/.test((document.activeElement || {}).tagName || '');
+  let h = window.innerHeight;
+  if (vv && typing) h = vv.height;                          // keyboard up: shrink to what is visible
+  if (IS_STANDALONE && !typing) h = Math.max(h, vv ? vv.height : 0);
+  return Math.round(h);
+}
+let vpT;
+function syncViewport() {
+  const h = measureH();
+  document.documentElement.style.setProperty('--app-h', h + 'px');
+  if (window.scrollY || document.documentElement.scrollTop) window.scrollTo(0, 0);
+  if (viewer) viewer.resize();
+  setSheet(sheetState, false);
+  if (debugBox) renderDebug();
+}
+function syncSoon() { clearTimeout(vpT); vpT = setTimeout(syncViewport, 60); }
+addEventListener('resize', syncSoon);
+addEventListener('orientationchange', () => { setTimeout(syncViewport, 250); setTimeout(syncViewport, 800); });
+addEventListener('pageshow', syncSoon);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) { syncSoon(); setTimeout(syncViewport, 500); } });
+if (window.visualViewport) { visualViewport.addEventListener('resize', syncSoon); visualViewport.addEventListener('scroll', syncSoon); }
+document.addEventListener('focusout', () => { setTimeout(syncViewport, 100); setTimeout(syncViewport, 450); });
+
+/* ?debug in the URL (or triple-tap the clock) shows viewport numbers — send me a screenshot if layout is off */
+let debugBox = null;
+function renderDebug() {
+  const vv = window.visualViewport, r = sheet.getBoundingClientRect(), cs = getComputedStyle(document.documentElement);
+  const probe = document.createElement('div'); probe.style.cssText = 'position:fixed;top:0;height:env(safe-area-inset-top,0px)'; document.body.appendChild(probe);
+  const sat = probe.offsetHeight; probe.remove();
+  debugBox.textContent = `standalone ${IS_STANDALONE}  ios ${IS_IOS}\nscreen ${screen.width}x${screen.height}  dpr ${devicePixelRatio}\n` +
+    `inner ${innerWidth}x${innerHeight}  vv ${vv ? vv.width.toFixed(0) + 'x' + vv.height.toFixed(0) + ' off ' + vv.offsetTop.toFixed(0) : '-'}\n` +
+    `app-h ${cs.getPropertyValue('--app-h')}  body ${document.body.offsetHeight}  sat ${sat} sab ${cs.getPropertyValue('--sab-px')}\n` +
+    `sheet ${sheetState} top ${r.top.toFixed(0)} h ${r.height.toFixed(0)} ty ${sheet.style.getPropertyValue('--ty')}`;
+}
+function toggleDebug() {
+  if (debugBox) { debugBox.remove(); debugBox = null; return; }
+  debugBox = document.createElement('pre');
+  debugBox.style.cssText = 'position:absolute;z-index:50;left:8px;top:calc(var(--sat) + 56px);font:10.5px/1.35 ui-monospace,Menlo,monospace;' +
+    'background:rgba(0,0,0,.85);color:#9fe;padding:8px;border-radius:8px;pointer-events:none;white-space:pre';
+  document.body.appendChild(debugBox); renderDebug();
+  setInterval(() => debugBox && renderDebug(), 1000);
+}
+
 (function probeSafeArea() {   // expose safe-area-bottom in px for sheet maths
   const d = document.createElement('div'); d.style.cssText = 'position:fixed;bottom:0;height:env(safe-area-inset-bottom,0px);width:0;visibility:hidden';
   document.body.appendChild(d);
@@ -1711,7 +1774,10 @@ async function boot() {
   setSpeed(1);
   showTab(prefs.tab || 'link', false);
   setSheet('peek', false);
-  requestAnimationFrame(() => setSheet('peek', false));
+  syncViewport();
+  requestAnimationFrame(syncViewport); setTimeout(syncViewport, 300); setTimeout(syncViewport, 1200);
+  if (/[?&#]debug/.test(location.href)) toggleDebug();
+  let taps = []; $('clock').addEventListener('click', () => { const n = performance.now(); taps = taps.filter(t => n - t < 700); taps.push(n); if (taps.length >= 3) { taps = []; toggleDebug(); } });
   registerSW();
 
   // restore constellations (deep link ?group=a,b overrides)
@@ -1721,7 +1787,7 @@ async function boot() {
   for (const g of list) await addGroup(g.key, g.label, g.url, null, null, true);
   if (IS_IOS && !IS_STANDALONE && !prefs.seenInstall) {
     prefs.seenInstall = true; savePrefs();
-    setTimeout(() => toast('Tip: Share ⬆︎ → Add to Home Screen to install', null, 7000), 1500);
+    setTimeout(() => { if (!$('toast').classList.contains('show')) toast('Tip: Share ⬆︎ → Add to Home Screen to install', null, 7000); }, 1500);
   }
 }
 boot();
